@@ -66,6 +66,28 @@ const CC_CHILD_ENV = {
 	MUSTER_HOOK_DISABLE: "1",
 } as const;
 
+// The pi session this extension INSTANCE serves, captured at session_start and
+// stamped on every Claude Code child as AGENT_SESSION_ID. Module scope is per
+// instance: pi-subagents re-evaluates this module for each in-process child
+// session, so a subagent's instance captures the subagent's id and the parent's
+// keeps the parent's. A child never inherits the host process's value — that
+// inherited value is exactly what a sibling extension used to leave behind after
+// a subagent ran, and every Claude Code child spawned afterwards then announced
+// itself as the subagent's session.
+let capturedSessionId: string | undefined;
+
+// Builds a Claude Code child's environment: base, then identity, then the
+// CC_CHILD_ENV overrides. AGENT_SESSION_ID is ALWAYS a key in the result: set
+// when an id was captured, explicitly undefined when not, so spawn unsets it
+// rather than passing whatever base carried. Pure; never mutates base.
+function childEnv(base: NodeJS.ProcessEnv, captured: string | undefined): Record<string, string | undefined> {
+	return {
+		...base,
+		AGENT_SESSION_ID: captured ? captured : undefined,
+		...CC_CHILD_ENV,
+	};
+}
+
 // Pi owns context files on the provider path, so Claude Code must not load its
 // own on top: otherwise a project CLAUDE.md arrives twice, and the user's
 // ~/.claude/CLAUDE.md — a persona written for a harness that is not the one
@@ -802,6 +824,10 @@ export const __test = {
 	deliverToolResults,
 	drainForAbort,
 	CC_CHILD_ENV,
+	childEnv,
+	capturedSessionId() {
+		return capturedSessionId;
+	},
 	buildMcpServers,
 	branchSummaryOutcome,
 	get promptCaptures() {
@@ -2189,6 +2215,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (event, ctx) => {
 		piUI = ctx.ui;
 		piMode = ctx.mode;
+		// Every reason, not only the first: /new, /resume and fork each change the
+		// session id, and the children spawned afterwards belong to the new one.
+		capturedSessionId = ctx.sessionManager.getSessionId();
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
