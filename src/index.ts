@@ -66,15 +66,26 @@ const CC_CHILD_ENV = {
 	MUSTER_HOOK_DISABLE: "1",
 } as const;
 
-// The pi session this extension INSTANCE serves, captured at session_start and
-// stamped on every Claude Code child as AGENT_SESSION_ID. Module scope is per
-// instance: pi-subagents re-evaluates this module for each in-process child
-// session, so a subagent's instance captures the subagent's id and the parent's
-// keeps the parent's. A child never inherits the host process's value — that
+// The process's TOP-LEVEL pi session, captured at session_start and stamped on
+// every Claude Code child as AGENT_SESSION_ID.
+//
+// Module scope is NOT per extension instance. pi 0.85.1's extension loader
+// caches the module per cwd and only re-invokes the factory (the default export)
+// for an in-process child session, so every instance in this process shares this
+// one variable — a naive capture on every session_start let a pi-subagents child
+// overwrite the parent's id. So: capture on "new", "resume" and "fork" (each
+// mints a new top-level id), and on "startup" only when nothing is captured yet.
+// pi's top-level session emits "startup" exactly once per process, and pi always
+// starts an in-process child session with reason "startup", so a later "startup"
+// is a child and never overwrites.
+//
+// Top-level is the identity the nested-harness consumers want: a Claude Code
+// child is a model call inside the top-level conversation, not a conversation of
+// its own. A child never inherits the host process's AGENT_SESSION_ID — that
 // inherited value is exactly what a sibling extension used to leave behind after
 // a subagent ran, and every Claude Code child spawned afterwards then announced
 // itself as the subagent's session.
-let capturedSessionId: string | undefined;
+let piSessionId: string | undefined;
 
 // Builds a Claude Code child's environment: base, then identity, then the
 // CC_CHILD_ENV overrides. AGENT_SESSION_ID is ALWAYS a key in the result: set
@@ -83,7 +94,7 @@ let capturedSessionId: string | undefined;
 function childEnv(base: NodeJS.ProcessEnv, captured: string | undefined): Record<string, string | undefined> {
 	return {
 		...base,
-		AGENT_SESSION_ID: captured ? captured : undefined,
+		AGENT_SESSION_ID: captured?.trim() || undefined,
 		...CC_CHILD_ENV,
 	};
 }
@@ -517,7 +528,7 @@ async function runIsolatedSummary(
 			prompt: promptText,
 			options: {
 				cwd,
-				env: childEnv(process.env, capturedSessionId),
+				env: childEnv(process.env, piSessionId),
 				settings: { autoMemoryEnabled: false },
 				tools: [],
 				strictMcpConfig: true,
@@ -825,8 +836,8 @@ export const __test = {
 	drainForAbort,
 	CC_CHILD_ENV,
 	childEnv,
-	capturedSessionId() {
-		return capturedSessionId;
+	piSessionId() {
+		return piSessionId;
 	},
 	buildMcpServers,
 	branchSummaryOutcome,
@@ -1814,7 +1825,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Manual /compact in CC still works (we never invoke it).
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
-		env: childEnv(process.env, capturedSessionId),
+		env: childEnv(process.env, piSessionId),
 		tools: [],
 		permissionMode: "bypassPermissions",
 		includePartialMessages: true,
@@ -2066,7 +2077,7 @@ async function promptAndWait(
 		prompt,
 		options: {
 			cwd,
-			env: childEnv(process.env, capturedSessionId),
+			env: childEnv(process.env, piSessionId),
 			permissionMode: "bypassPermissions",
 			settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
 			skills: [],
@@ -2214,9 +2225,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (event, ctx) => {
 		piUI = ctx.ui;
 		piMode = ctx.mode;
-		// Every reason, not only the first: /new, /resume and fork each change the
-		// session id, and the children spawned afterwards belong to the new one.
-		capturedSessionId = ctx.sessionManager.getSessionId();
+		// Capture the top-level session only (see piSessionId above): "new",
+		// "resume" and "fork" each mint a new top-level id, while "startup" is
+		// captured only when nothing is held yet — the process's first startup.
+		// A later "startup" is an in-process child session and must not overwrite.
+		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork" || piSessionId === undefined) {
+			piSessionId = ctx.sessionManager.getSessionId();
+		}
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
