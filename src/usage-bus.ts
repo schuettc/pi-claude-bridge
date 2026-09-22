@@ -230,7 +230,7 @@ const ACCOUNT_WINDOWS: Record<string, { label: string; windowMinutes?: number; s
 		windowMinutes: 7 * 24 * 60,
 		scope: {
 			kind: "model",
-			modelIds: ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
+			modelIds: ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
 			label: "Opus",
 		},
 	},
@@ -247,7 +247,7 @@ const ACCOUNT_WINDOWS: Record<string, { label: string; windowMinutes?: number; s
 
 const MODEL_IDS_BY_BUCKET: Record<string, string[]> = {
 	fable: ["claude-fable-5-1", "claude-fable-5"],
-	opus: ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
+	opus: ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
 	sonnet: ["claude-sonnet-5", "claude-sonnet-4-6"],
 	haiku: ["claude-haiku-4-5"],
 };
