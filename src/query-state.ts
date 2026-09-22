@@ -31,9 +31,6 @@ export class QueryContext {
 	/** Last rate-limit rejection seen on this query. Claude Code sends it just before the
 	 *  failure it caused, which is the only thing tying the two together. */
 	rateLimitRejection: { rateLimitType?: string; resetsAt?: number } | null = null;
-	/** Highest 5% utilization bucket we notified for, so repeat rate_limit_event spam is suppressed. */
-	lastRateLimitWarnStep: number | null = null;
-	lastRateLimitWarnThreshold: number | undefined;
 	/** pi session this query serves, from SimpleStreamOptions.sessionId at fresh-query
 	 *  setup. A bridge process serves several pi sessions at once (subagents run their
 	 *  own AgentSessions), and history rewrites must only discard the rewriting
