@@ -74,16 +74,28 @@ const CC_CHILD_ENV = {
 	MUSTER_HOOK_DISABLE: "1",
 } as const;
 
-// Child env for spawned Claude Code processes, stamped with the captured pi
-// session id so muster (and anything reading AGENT_SESSION_ID) attributes the
-// child to the hosting session rather than minting a new identity.
-function childEnv(base: NodeJS.ProcessEnv, captured: string | undefined): Record<string, string | undefined> {
+// Child env for spawned Claude Code processes, stamped with the captured
+// top-level pi session id as AGENT_SESSION_ID. muster reads AGENT_SESSION_ID
+// (harnessenv.FromEnv) for caller identity on its MCP server and hook paths;
+// stamping the top-level id overwrites any stale value a child inherited (e.g.
+// a pi-subagents subagent's), so muster attributes the child's calls to the
+// hosting session. MUSTER_HOOK_DISABLE covers only the hook path, not the MCP
+// caller-identity path, so this stamping is still load-bearing. An empty
+// captured id unsets the key so a stale inherited value never leaks through.
+function stampedChildEnv(base: NodeJS.ProcessEnv, captured: string | undefined): Record<string, string | undefined> {
 	return {
 		...base,
 		AGENT_SESSION_ID: captured?.trim() || undefined,
 		...CC_CHILD_ENV,
 	};
 }
+
+// The process's TOP-LEVEL pi session id, captured at the first real session_start
+// (see the session_start handler). Stamped onto every spawned CC child via
+// stampedChildEnv so muster attributes children to the hosting session. Not named
+// piSessionId: upstream's per-query `piSessionId` (options.sessionId, which is a
+// subagent's own id inside a subagent) would shadow it in streamClaudeAgentSdk.
+let topLevelPiSessionId: string | undefined;
 
 // Pi owns context files on the provider path, so Claude Code must not load its
 // own on top: otherwise a project CLAUDE.md arrives twice, and the user's
@@ -623,7 +635,7 @@ async function runIsolatedSummary(
 			prompt: promptText,
 			options: {
 				cwd,
-				env: { ...process.env, ...CC_CHILD_ENV },
+				env: stampedChildEnv(process.env, topLevelPiSessionId),
 				settings: { autoMemoryEnabled: false },
 				tools: [],
 				strictMcpConfig: true,
@@ -1211,7 +1223,7 @@ function bindClaudeUsageAdapterOwner(owner: ClaudeUsageAdapterOwner, ctx: Pick<E
 	const dependencies: UsageRefreshDependencies = {
 		query: usageControlQuery,
 		cwd,
-		env: childEnv(process.env, sessionId),
+		env: stampedChildEnv(process.env, sessionId),
 		provider: { ...(loadConfig(cwd).provider ?? {}) },
 	};
 	owner.dependencies = dependencies;
@@ -2156,7 +2168,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ...CC_CHILD_ENV };
+	const childEnv = stampedChildEnv(process.env, topLevelPiSessionId);
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,
@@ -2430,7 +2442,7 @@ async function promptAndWait(
 		prompt,
 		options: {
 			cwd,
-			env: { ...process.env, ...CC_CHILD_ENV },
+			env: stampedChildEnv(process.env, topLevelPiSessionId),
 			permissionMode: "bypassPermissions",
 			settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
 			skills: [],
@@ -2611,6 +2623,14 @@ export default function (pi: ExtensionAPI) {
 			bindClaudeUsageAdapterOwner(ownedUsageAdapterOwner, ctx);
 			beginStandaloneWarningSession(pi, ctx, event.reason === "fork");
 			ownsStandaloneWarningSession = true;
+		}
+		// Capture the top-level session id for AGENT_SESSION_ID stamping (see
+		// stampedChildEnv): "new", "resume" and "fork" each mint a new top-level id,
+		// while a later "startup" is an in-process child session and must not
+		// overwrite the id the top-level session already holds.
+		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork" || topLevelPiSessionId === undefined) {
+			const sessionId = ctx.sessionManager?.getSessionId?.();
+			if (sessionId) topLevelPiSessionId = sessionId;
 		}
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
