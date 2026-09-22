@@ -10,6 +10,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
+import { isForeignOneShot } from "./one-shot.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
@@ -1748,6 +1749,15 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// (separate persistSession:false CC process, no session sync needed).
 	if (options?.cacheRetention === "none") {
 		debug(`provider: one-off summarizer call (cacheRetention none) routed to isolated summary, msgs=${context.messages.length}`);
+		return isolatedStreamFn(model, context, options);
+	}
+
+	// A permission reviewer or judge extension calls our streamSimple with its own
+	// rubric, one user message and no tools — often mid-turn, where the main lane
+	// would take it for a reentrant query of the active session. Serve it on the
+	// same isolated one-shot path as the summarizers.
+	if (isForeignOneShot(context, (systemPrompt) => promptCaptures.resolveOrDerive(systemPrompt))) {
+		debug(`provider: foreign one-shot (${context.systemPrompt!.length}-char system prompt, no tools) routed to isolated path, activeQuery=${!!ctx().activeQuery}`);
 		return isolatedStreamFn(model, context, options);
 	}
 
