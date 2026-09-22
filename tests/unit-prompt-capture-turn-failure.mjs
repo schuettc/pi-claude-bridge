@@ -31,9 +31,13 @@ activate({
 	registerTool: () => {},
 });
 const model = providerConfig.models[0];
+// One tool makes this a main-lane turn: in this fork a single-message, tool-less call
+// with an unrecorded prompt is a foreign one-shot (src/one-shot.ts) and is served on
+// the isolated path rather than failed.
+const TOOLS = [{ name: "read", description: "read a file", parameters: { type: "object", properties: {} } }];
 const turn = (systemPrompt) => providerConfig.streamSimple(
 	model,
-	{ systemPrompt, messages: [{ role: "user", content: "hi", timestamp: 0 }], tools: [] },
+	{ systemPrompt, messages: [{ role: "user", content: "hi", timestamp: 0 }], tools: TOOLS },
 	{ sessionId: "pi-session" },
 );
 
