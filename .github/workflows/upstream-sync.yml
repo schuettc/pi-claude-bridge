@@ -1,10 +1,13 @@
 name: upstream-sync
 
-# Keeps @schuettc/pi-claude-bridge current with upstream elidickinson/pi-claude-bridge.
-# Daily (and on demand): rebase our patch stack onto upstream/main. If it applies
-# cleanly, compute the next <upstream-base>-schuettc.N version and publish it to npm
-# via OIDC trusted publishing (no stored token). If the rebase conflicts, open an
-# issue and FAIL the run (exit 1) — nothing is published.
+# Standard @schuettc fork sync (tools-ops/templates/fork-sync). Daily and on
+# demand: rebase schuettc-publish onto upstream; on a clean rebase publish the
+# next <upstream-base>-schuettc.N via npm OIDC trusted publishing. Conflicts and
+# failures open a tracking issue that @mentions the owner and fail the run.
+#
+# Per-fork settings live ONLY in `env:` below. The script is byte-identical to
+# the template. npm trusted publisher must name this repo + workflow file
+# `upstream-sync.yml` (no environment).
 
 on:
   schedule:
@@ -12,7 +15,11 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: "Publish current state even if not behind upstream"
+        description: "Publish the current state even if already in sync"
+        type: boolean
+        default: false
+      notify_test:
+        description: "Open and close a test issue to prove alerts reach you, then stop"
         type: boolean
         default: false
 
@@ -24,6 +31,14 @@ permissions:
 concurrency:
   group: upstream-sync
   cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: "elidickinson/pi-claude-bridge"
+  UPSTREAM_BRANCH: "main"
+  PKG_NAME: "@schuettc/pi-claude-bridge"
+  PKG_DIR: "."
+  TAG_PREFIX: "v"
+  BUILD_CMD: ""
 
 jobs:
   sync:
@@ -43,4 +58,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force }}
-        run: bash .github/scripts/upstream-sync.sh "${FORCE:-false}"
+          NOTIFY_TEST: ${{ inputs.notify_test }}
+        run: bash .github/scripts/upstream-sync.sh
