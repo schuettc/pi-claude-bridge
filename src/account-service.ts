@@ -20,7 +20,9 @@ import {
 } from "./accounts.js";
 import type { AuthStatus, SigninRun } from "./signin.js";
 
-export type Result<T> = { ok: true; value: T } | { ok: false; reason: string };
+// Both branches name both fields: the repo compiles without strictNullChecks,
+// where `!result.ok` does not narrow the union, so `.reason` must be readable on it.
+export type Result<T> = { ok: true; value: T; reason?: undefined } | { ok: false; value?: undefined; reason: string };
 
 export interface SigninOutcome {
 	status: AuthStatus;
