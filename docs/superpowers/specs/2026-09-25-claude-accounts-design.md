@@ -44,7 +44,7 @@ A bare `/claude-account` opens a centered overlay in the creel look that `/types
 |---|---|
 | ↑↓ / j k | Move |
 | Enter / Space on an account | Switch this session to it; takes effect on the next turn. On a `signed out` account, sign in again instead. |
-| Enter on `+ Add account` | A name field opens inside the box, then sign-in starts (below). |
+| Enter on `+ Add account` | Name and email fields open inside the box, then sign-in starts (below). |
 | `d` | Make the selected account the default for new sessions. |
 | `r` | Rename, using a field inside the box. |
 | `x` | Remove, after a `y/N` prompt inside the box. The prompt says so if this session is using that account. |
@@ -57,7 +57,7 @@ A bare `/claude-account` opens a centered overlay in the creel look that `/types
 | Command | Does |
 |---|---|
 | `/claude-account <name>` | Switch this session |
-| `/claude-account add <name>` | Sign in a new account |
+| `/claude-account add <name> <email>` | Sign in a new account |
 | `/claude-account default <name>` | Set the default |
 | `/claude-account list` | Print the accounts |
 | `/claude-account remove <name>` | Remove, after confirmation |
@@ -65,11 +65,20 @@ A bare `/claude-account` opens a centered overlay in the creel look that `/types
 Without the interactive TUI, a bare `/claude-account` prints the list.
 
 ### Signing in
-1. Adding an account creates `~/.pi/agent/claude-bridge/accounts/<name>/`.
-2. The bridge runs `claude auth login` with `CLAUDE_CONFIG_DIR` set to that directory. This is the command-line form of Claude Code's `/login`: the browser opens and you sign in as usual.
-3. While it waits, the panel shows `waiting for browser sign-in… (esc cancels)`.
-4. When the command finishes, the bridge runs `claude auth status --json` against the directory. It then shows the email and plan and adds the row.
-5. **If `claude auth login` needs a real terminal** (spike question 1), the same command runs in a `tmux display-popup` instead, the way creel captures secrets. Outside tmux, the panel says to run pi inside tmux for sign-in.
+No copying or pasting at any point.
+
+1. Adding an account asks for two things inside the box: the name, then the account's email.
+2. The bridge creates `~/.pi/agent/claude-bridge/accounts/<name>/`.
+3. It runs `claude auth login --claudeai --email <email>` with `CLAUDE_CONFIG_DIR` set to that directory. This is the command-line form of Claude Code's `/login`. Its stdio is piped, with no terminal attached, which the spike showed works. The browser opens with the email filled in, and you finish signing in there.
+4. While it waits, the panel shows `waiting for browser sign-in… · o reopen page · esc cancel`.
+   - **`o`** reopens the current run's sign-in page, using the URL the command prints, with the system `open`. A lost or closed tab never means copying a URL. Each run listens on its own random localhost port, so an old run's tab can't finish a new run's sign-in; `o` always opens the live one.
+   - **Esc** kills the command and cleans up (see Errors).
+   - **The URL is shown in the box only when no browser can be opened.**
+5. When the command exits 0, the bridge runs `claude auth status --json` against the directory. It then shows the email and plan and adds the row.
+
+Signing an account in again (a `signed out` row) runs the same flow, with the email taken from the last `claude auth status` recorded for it.
+
+The command also reads a pasted code from stdin (`Paste code here if prompted`). The bridge never uses that path; stdin stays open and unused.
 
 The bridge never reads, copies or stores a credential. Claude Code writes it where it always does (the Keychain on macOS).
 
@@ -83,9 +92,9 @@ The login pi was launched with becomes the first account automatically, named `d
   ```json
   { "version": 1, "default": "work",
     "accounts": [ { "name": "default", "configDir": null },
-                  { "name": "work", "configDir": "~/.pi/agent/claude-bridge/accounts/work" } ] }
+                  { "name": "work", "configDir": "~/.pi/agent/claude-bridge/accounts/work", "email": "you@work.com" } ] }
   ```
-  `configDir: null` means "the login pi was launched with". A missing file means only that account exists.
+  `configDir: null` means "the login pi was launched with". `email` is the last one `claude auth status` reported; it is used only to pre-fill a repeat sign-in. A missing file means only that account exists.
 - **Names:** `^[a-z0-9][a-z0-9-]{0,31}$`, unique.
 - **Active account:** one per pi process, held in a new module `src/accounts.ts` on a versioned `globalThis` symbol. A subagent that loads a separate copy of the bridge module therefore sees its parent's account. One pi process has one top-level session open at a time, which matches the bridge's existing process-wide model (one `sharedSession`).
 - **Per session:** switching appends a `claude-bridge-account` custom entry, `{ name }`, with `pi.appendEntry`. On `session_start` (new, resume, fork, reload) the bridge applies the session's latest entry, or the default if there is none.
@@ -124,13 +133,15 @@ A switch requested during a turn applies from the next turn. The turn in progres
 - Offering this upstream. The fork may separate from upstream entirely; that is a separate decision.
 - A shared panel helper across extensions. The ~30-line box renderer is copied from `pi-typesafe-ai` so the bridge stays self-contained; extracting it is recorded as a separate finding.
 
-## Spike (before implementation)
-1. Does `claude auth login` complete when started by the bridge without a real terminal? If not, confirm the tmux-popup fallback works.
-2. Does `claude auth login` produce the same login as interactive `/login`? `claude auth status --json` should report `authMethod: claude.ai` and the right `subscriptionType`.
-3. With two directories signed in, does `claude auth status --json` report each account separately?
-4. Does the bridge's usage meter report each account correctly under its `CLAUDE_CONFIG_DIR`?
+## Spike results (2026-09-25, Claude Code 2.1.282, Agent SDK 0.3.280)
+Run with throwaway scripts against a scratch config directory; nothing from the spike is kept.
 
-Results are recorded in this spec before the plan is written. A "no" on question 1 changes only the sign-in section; a "no" on 3 or 4 is a blocker to raise with Court.
+1. **Sign-in without a terminal: yes.** `claude auth login --claudeai`, spawned with piped stdio and `CLAUDE_CONFIG_DIR` set, opened the browser. It exited 0 with `Login successful.` once Court signed in (43 s and 120 s). No tmux fallback is needed, and none is built.
+2. **Same as `/login`: yes.** `claude auth status --json` on the new directory reports `authMethod: claude.ai`, `apiProvider: firstParty`, `subscriptionType: max`, the same as the existing login.
+3. **Separate accounts: yes.** With a second account signed in, the two directories report different emails and orgs. `claude auth logout` on the scratch directory left the launch login signed in.
+4. **Usage follows the directory: yes.** The bridge's usage-refresh shape (a no-prompt SDK query with `accountInfo()` and the usage control call) reports the right account and plan for each directory. `rate_limits` is `null` for both, including the launch login, before any turn. That is existing behavior, and the live check covers the per-turn rate-limit snapshots.
+
+**Lesson from the spike:** a stale sign-in tab from an earlier run sends the browser to a closed localhost port and gets `ERR_CONNECTION_REFUSED`. This is why `o` reopens the live page and why the email is pre-filled, so choosing the account never depends on which claude.ai session the browser holds.
 
 ## Verification
 **Unit tests**
