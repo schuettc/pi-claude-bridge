@@ -65,24 +65,32 @@ A bare `/claude-account` opens a centered overlay in the creel look that `/types
 Without the interactive TUI, a bare `/claude-account` prints the list.
 
 ### Signing in
-No copying or pasting at any point.
+Only normal clicks, in your normal browser. No copying or pasting at any point.
 
 1. Adding an account asks for a name inside the box.
 2. The bridge creates `~/.pi/agent/claude-bridge/accounts/<name>/`.
-3. It runs `claude auth login --claudeai` with `CLAUDE_CONFIG_DIR` set to that directory. This is the command-line form of Claude Code's `/login`. Its stdio is piped, with no terminal attached, which the spike showed works. The browser opens Anthropic's sign-in page, and you choose the account and sign in there.
-4. While it waits, the panel shows `waiting for browser sign-in… · r restart · esc cancel`, with the dim hint `Switched account on the page? Press r.`
-   - **`r`** stops the running command and starts a fresh one, which opens a fresh tab. It exists for one observed case (see Spike results): switching accounts on Anthropic's page goes through an emailed link, and that link returns the browser to a stale sign-in request instead of the one waiting. The browser is left signed in as the new account, so the fresh tab shows a one-click Authorize for it.
-   - **Esc** kills the command and cleans up (see Errors).
-   - **Stopping a run** (`r`, Esc, the panel closing, pi exiting) kills the `claude` process itself and its process group. The spike showed that killing only a parent left `claude auth login` running and still listening on its port.
-5. When the command exits 0, the bridge runs `claude auth status --json` against the directory. It then shows the email and plan and adds the row.
+3. It runs `claude auth login --claudeai` with `CLAUDE_CONFIG_DIR` set to that directory. This is the command-line form of Claude Code's `/login`. Its stdio is piped, with no terminal attached, which the spike showed works.
+4. **The browser goes through claude.ai's logout first.** `claude auth login` opens its sign-in page by running `open <url>`. The bridge puts a bridge-owned directory first on the command's `PATH`, holding an `open` stand-in:
+   - For the sign-in URL (`https://claude.com/cai/oauth/authorize?<query>` or `https://claude.ai/oauth/authorize?<query>`), it opens `https://claude.ai/logout?returnTo=<url-encoded /oauth/authorize?<query>>` with `/usr/bin/open`.
+   - Any other arguments pass straight through to `/usr/bin/open`.
+
+   Result: the browser is signed out of claude.ai and lands on Claude's login page, which still carries this run's sign-in request. You enter the account's email, click the link in the email, and click Authorize.
+
+   Why: Anthropic's own "Switch account" button loses the sign-in request (see Spike results), and the browser is usually signed in to a different account than the one being added. Going through logout with the request attached avoids that button in every case, including when the browser is already on the right account.
+5. While it waits, the panel shows `waiting for browser sign-in… · esc cancel`. Esc kills the command and cleans up (see Errors).
+6. When the command exits 0, the bridge runs `claude auth status --json` against the directory. It then shows the email and plan and adds the row.
+
+**Side effect:** adding or re-signing an account signs the browser out of claude.ai. Court accepted this. The browser holds only one claude.ai account at a time anyway.
+
+**Stopping a run** (Esc, the panel closing, pi exiting) kills the `claude` process and its process group. The spike showed that killing only a parent left `claude auth login` running and still listening on its port.
 
 Signing an account in again (a `signed out` row) runs the same flow against that account's directory.
 
-The URL the command prints is not used. It is the paste-a-code variant (`redirect_uri` = `platform.claude.com/oauth/code/callback`). Each run's automatically opened tab is the one that completes it: every run listens on its own random localhost port, so a tab left over from an earlier run cannot finish a new one.
+**Not used:** the URL the command prints. It is the paste-a-code variant (`redirect_uri` = `platform.claude.com/oauth/code/callback`), and so is the command's `Paste code here if prompted` stdin. stdin stays open and unused.
+
+**Platform:** the `open` stand-in is verified on macOS only. Linux (`xdg-open`) is out of scope until checked.
 
 **Row details:** the panel reads each account's email and plan by running `claude auth status --json` for every account in parallel when it opens, showing `…` until each answers. They are not stored.
-
-The command also reads a pasted code from stdin (`Paste code here if prompted`). The bridge never uses that path; stdin stays open and unused.
 
 The bridge never reads, copies or stores a credential. Claude Code writes it where it always does (the Keychain on macOS).
 
@@ -126,6 +134,7 @@ A switch requested during a turn applies from the next turn. The turn in progres
 | The active account's login expired or was revoked | The turn fails with `Claude account "<name>" is signed out. /claude-account to sign in again.` The row shows `signed out`. Never fall back to another account silently. |
 | A session names an account that no longer exists | Apply the default and notify: `Account "<old>" no longer exists; using <default>.` |
 | Sign-in cancelled or failed | No row is added, the new directory is deleted, and the panel shows `✗ Sign-in didn't finish: <reason>`. |
+| The `open` stand-in never sees a sign-in URL (a future Claude Code opens the browser another way, or changes the URL) | The URL passes through unchanged, so sign-in still works when the browser is already on the right account. The panel notes `browser opened without the sign-out step` so a wrong-account page is explainable. The integration check below catches this on upgrades. |
 | Invalid or duplicate name | Rejected in the box with the reason. |
 | Removing the active account | The confirmation names it; the session moves to the default. |
 | Removing the launch-login account | Refused, with the reason; renaming is allowed. |
@@ -145,18 +154,28 @@ Run with throwaway scripts against a scratch config directory; nothing from the 
 3. **Separate accounts: yes.** With a second account signed in, the two directories report different emails and orgs. `claude auth logout` on the scratch directory left the launch login signed in.
 4. **Usage follows the directory: yes.** The bridge's usage-refresh shape (a no-prompt SDK query with `accountInfo()` and the usage control call) reports the right account and plan for each directory. `rate_limits` is `null` for both, including the launch login, before any turn. That is existing behavior, and the live check covers the per-turn rate-limit snapshots.
 
-**Second run's failure:** after a detour through a private window, the browser was sent to `localhost:64817/callback`, a port no run was listening on, and got `ERR_CONNECTION_REFUSED`. At the time this was blamed on copying an earlier run's URL. The fourth run showed the real cause (below).
+### Why switching accounts failed, and the fix
+Found by recording every page and redirect in a separate, clean Chrome profile (a diagnostic tool only; the feature uses the normal browser).
 
-**Retest (same day):** using only the tab the command opened, in the normal browser window, Court signed a scratch directory in as the `subaud.io` account. It finished in 4.9 s, a one-click approval of the account the browser was already signed in as. So both page behaviors have been seen: asking for an email (first run) and one-click approval of the browser's current claude.ai account (retest).
+**Normal flow, browser signed out (works):**
+1. Claude Code opens `claude.com/cai/oauth/authorize?…redirect_uri=http://localhost:<port>/callback…&state=<s>`, which redirects (307) to `claude.ai/oauth/authorize?<same query>`.
+2. Not signed in, so it goes to `claude.ai/login?selectAccount=true&returnTo=/oauth/authorize?<same query>`. The request travels in `returnTo`.
+3. The emailed link is `claude.ai/magic-link#<token>:<email in base64>`. It carries no request. Opened in the same browser, it signs you in and the original tab continues. Opened in a different browser, it shows a code to type "where you first tried to sign in".
+4. Authorize → `localhost:<port>/callback?code=…&state=<s>` → `Login successful.`
 
-**Switching accounts on the page (third and fourth runs):** with the browser signed in as `subaud.io`, the command's tab showed `Logged in as … · Authorize · Switch account`. Court used Switch account, entered the other email and clicked the emailed link. The browser then went to `localhost:64817/callback` with the **same** `state` as the very first failure (`5xMRO1…`), not to the waiting run's port (65292), and got `ERR_CONNECTION_REFUSED`. The emailed link resumes a stale sign-in request on Anthropic's side, reproducibly. A fresh run then showed `Logged in as court@workshop.institute · Authorize` and finished in 16 s with the right account. This is why the waiting screen has `r restart`.
+**Root cause: Anthropic's "Switch account" button drops the request.** It navigates to `claude.ai/logout?returnTo=/login?from=logout&selectAccount=true&returnTo=<request>`, but the logout page then goes to plain `claude.ai/login?from=logout`, dropping `selectAccount` and the nested `returnTo`. After signing in, nothing leads back to the waiting run. In the clean profile it landed on `claude.ai/new`. In Court's normal Chrome it landed on `localhost:64817/callback` with `state=5xMRO1…`, a request from earlier in the day whose run had exited (`ERR_CONNECTION_REFUSED`). That happened three times, the same state and port each time. Where that old request is kept was not established (not in claude.ai's localStorage, sessionStorage or readable cookies); the fix removes the dependence on it.
 
-The second run's failure carried the same `state` and port, so it was this stale-link behavior too.
+**Checked and ruled out:** going straight to `claude.ai/login?selectAccount=true&returnTo=<request>` while signed in bounces directly to Authorize for the current account, with no chance to choose.
 
-**The browser holds one claude.ai account at a time**, the last one signed in. Adding an account whose email differs from the browser's current one therefore usually takes Switch account → emailed link → `r` → Authorize. This affects only sign-in, which happens once per account. Each directory's Claude Code login is independent of the browser: two directories stayed signed in to different accounts at once, and signing one out left the other intact.
+**Fix, verified:** `claude.ai/logout?returnTo=/oauth/authorize?<query>` (a single level) is honored. Logout → `oauth/authorize` → signed out → `login?selectAccount=true&returnTo=<request>`, intact. Verified twice:
+- In the clean profile, with the browser on `workshop.institute` while adding `subaud.io`.
+- In Court's normal Chrome through the `open` stand-in, clicking the emailed link from the mail app. Run on port 54704: `Login successful.` in 33 s, directory reports `subaud.io` · Max · `claude.ai`, launch login untouched.
+
+**Also observed:** a run left waiting keeps its port. Killing only the parent of `claude auth login` left it running and listening.
 
 ## Verification
 **Unit tests**
+- **`open` stand-in:** both sign-in URL shapes become `claude.ai/logout?returnTo=<encoded /oauth/authorize?query>`, with the query preserved byte for byte (state, code_challenge, redirect_uri port). Anything else passes through unchanged.
 - **Resolver:** the launch-login account passes the environment through unchanged. A named account sets `CLAUDE_CONFIG_DIR` and removes the three token variables. Every session-file call site receives the resolved directory.
 - **Registry:** round trip, corrupt-file fallback, name validation, and the rule protecting the launch-login account.
 - **Per-session state:** a switch appends the entry. `session_start` restores it, or falls back with a notice. A switch forces a rotated rebuild in the new directory and re-binds the usage adapter.
@@ -165,5 +184,6 @@ The second run's failure carried the same `state` and port, so it was this stale
 **Integration tests**, in the `tests/int-*.mjs` harness against a real Claude Code:
 - **Recall across a switch:** plant a codeword on account A, switch to B, and confirm recall after a rebuild. This runs with one real login by pointing two accounts at the same directory, as PR #60's `int-profile-switch` does.
 - **File placement:** session files land in the active account's directory.
+- **Browser launch contract:** `claude auth login`, run with the stand-in on `PATH`, calls it with a sign-in URL within a few seconds. This is killed before any browser opens. It guards the one assumption about how Claude Code opens the browser.
 
 **Live check** with two real logins: switch personal → work → personal in one session. History should survive, `claude auth status` should confirm each account, and the usage meter should follow.
