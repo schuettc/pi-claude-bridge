@@ -153,3 +153,16 @@ describe("readAuthStatus and signOut", () => {
 		} finally { s.cleanup(); }
 	});
 });
+
+describe("stand-in interpreter", () => {
+	it("runs the stand-in with the node running pi", () => {
+		assert.equal(signin.standInShebang("/Users/me/.nvm/versions/node/v24/bin/node", {}), "#!/Users/me/.nvm/versions/node/v24/bin/node");
+	});
+	it("falls back to node on PATH when pi is a compiled binary", () => {
+		assert.equal(signin.standInShebang("/usr/local/bin/pi", { bun: "1.2.0" }), "#!/usr/bin/env node");
+		assert.equal(signin.standInShebang("/usr/local/bin/pi", {}), "#!/usr/bin/env node");
+	});
+	it("falls back when the node path has a space, which a shebang cannot hold", () => {
+		assert.equal(signin.standInShebang("/Applications/My Tools/node", {}), "#!/usr/bin/env node");
+	});
+});

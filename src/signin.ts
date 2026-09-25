@@ -10,7 +10,7 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { accountEnv, type Account } from "./accounts.js";
 
 type Env = Record<string, string | undefined>;
@@ -56,9 +56,16 @@ export function cancelAllSignins(): void {
 	for (const run of [...running]) run.cancel();
 }
 
+/** The stand-in's interpreter: the node running pi, unless pi is a compiled
+ *  binary (its execPath is pi itself) or the path cannot sit in a shebang. */
+export function standInShebang(execPath: string, versions: { bun?: string }): string {
+	const isNode = /^node(\.exe)?$/.test(basename(execPath));
+	return isNode && !versions.bun && !/\s/.test(execPath) ? `#!${execPath}` : "#!/usr/bin/env node";
+}
+
 function standInSource(openBin: string): string {
 	return [
-		`#!${process.execPath}`,
+		standInShebang(process.execPath, process.versions as { bun?: string }),
 		`"use strict";`,
 		`const { spawnSync } = require("node:child_process");`,
 		`const { appendFileSync } = require("node:fs");`,
