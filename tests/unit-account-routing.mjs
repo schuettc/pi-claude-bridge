@@ -113,3 +113,17 @@ describe("child environment and errors follow the account", () => {
 		assert.equal(text, "API Error: 500");
 	});
 });
+
+describe("usage meter follows the account", () => {
+	afterEach(() => __test.setInlineUsageSnapshot(undefined));
+
+	it("uses the last turn's snapshot only while the same account is active", () => {
+		const snapshot = { version: 1, provider: "claude", complete: true, windows: [] };
+		__test.setInlineUsageSnapshot(snapshot);
+		assert.equal(__test.cachedUsageForActiveAccount(), snapshot, "same account: reuse");
+		acc.setActiveAccount({ id: "b1", name: "b", configDir: "/tmp/accounts/b1" });
+		assert.equal(__test.cachedUsageForActiveAccount(), undefined, "after a switch: refresh instead");
+		acc.setActiveAccount(acc.LAUNCH_ACCOUNT);
+		assert.equal(__test.cachedUsageForActiveAccount(), snapshot, "back on the first account: its snapshot again");
+	});
+});

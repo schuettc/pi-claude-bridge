@@ -191,8 +191,18 @@ let unregisterClaudeUsageAdapter: (() => void) | undefined;
 
 // The most recent COMPLETE inline usage snapshot parsed from an SDK rate_limit_event's
 // `unifiedWindows`. The registered usage adapter prefers this over polling so the meter
-// reflects the freshest data the inference stream already delivered.
-let lastInlineUsageSnapshot: ProviderUsageSnapshotV1 | undefined;
+// reflects the freshest data the inference stream already delivered. Kept per
+// account: after a switch, another account's snapshot would be the wrong meter.
+const inlineUsageSnapshots = new Map<string, ProviderUsageSnapshotV1>();
+
+function setInlineUsageSnapshot(snapshot: ProviderUsageSnapshotV1 | undefined): void {
+	if (snapshot === undefined) inlineUsageSnapshots.clear();
+	else inlineUsageSnapshots.set(getActiveAccount().id, snapshot);
+}
+
+function cachedUsageForActiveAccount(): ProviderUsageSnapshotV1 | undefined {
+	return inlineUsageSnapshots.get(getActiveAccount().id);
+}
 
 // Ours among pi-ai's api-provider registrations, so shutdown removes only the one
 // this module instance made. Per instance, not per package: a subagent instance
@@ -852,6 +862,8 @@ function buildSideRequestSession(
 
 // @internal
 export const __test = {
+	setInlineUsageSnapshot,
+	cachedUsageForActiveAccount,
 	resetSharedSession() {
 		sharedSession = null;
 	},
@@ -1622,7 +1634,7 @@ async function consumeQuery(
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
 			const snapshot = snapshotFromClaudeRateLimitInfo(info);
-			if (snapshot?.complete) lastInlineUsageSnapshot = snapshot;
+			if (snapshot?.complete) setInlineUsageSnapshot(snapshot);
 			if (info?.status === "allowed") {
 				if (snapshot) publishProviderUsage({ version: 1, type: "snapshot", snapshot });
 				continue;
@@ -2454,10 +2466,10 @@ export default function (pi: ExtensionAPI) {
 		if (unregisterClaudeUsageAdapter) return;
 		const owner = createClaudeUsageAdapterOwner();
 		unregisterClaudeUsageAdapter = registerClaudeUsageAdapter(
-			(options) =>
-				lastInlineUsageSnapshot !== undefined
-					? Promise.resolve(lastInlineUsageSnapshot)
-					: refreshClaudeUsage(options, undefined, owner),
+			(options) => {
+				const cached = cachedUsageForActiveAccount();
+				return cached !== undefined ? Promise.resolve(cached) : refreshClaudeUsage(options, undefined, owner);
+			},
 		);
 		ownedUsageAdapterOwner = owner;
 		ownsUsageAdapter = true;
