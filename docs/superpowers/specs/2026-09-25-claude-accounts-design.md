@@ -56,7 +56,7 @@ A bare `/claude-account` opens a centered overlay in the creel look that `/types
 
 | Command | Does |
 |---|---|
-| `/claude-account <name>` | Switch this session |
+| `/claude-account <name>` or `use <name>` | Switch this session |
 | `/claude-account add <name>` | Sign in a new account |
 | `/claude-account default <name>` | Set the default |
 | `/claude-account list` | Print the accounts |
@@ -111,9 +111,9 @@ The login pi was launched with becomes the first account automatically, named `d
 - **Ids, not names, for anything durable:** each account has a random id (`launch` for the launch login), used for its config directory, for `default`, and in session entries.
   - **A config directory never moves.** macOS keys a Claude Code login's Keychain entry by the config directory's path, so moving or renaming the directory would sign the account out.
   - **Renaming changes only `name`.** Sessions and the default keep pointing at the same account.
-- **Names:** `^[a-z0-9][a-z0-9-]{0,31}$`, unique; they are labels only.
+- **Names:** `^[a-z0-9][a-z0-9-]{0,31}$`, unique; they are labels only. `add`, `list`, `remove` and `use` are reserved, because they are subcommands. `/claude-account default` with no further argument switches to the account named `default`; `/claude-account use <name>` always switches.
 - **Active account:** one per pi process, held in a new module `src/accounts.ts` on a versioned `globalThis` symbol. A subagent that loads a separate copy of the bridge module therefore sees its parent's account. One pi process has one top-level session open at a time, which matches the bridge's existing process-wide model (one `sharedSession`).
-- **Per session:** switching appends a `claude-bridge-account` custom entry, `{ id }`, with `pi.appendEntry`. On a top-level `session_start` (`new`, `resume`, `fork`, `reload`, and the first `startup`) the bridge applies the session's latest entry, or the default if there is none. A later `startup` is an in-process subagent session and leaves the active account alone, the same rule the bridge already uses for `AGENT_SESSION_ID`.
+- **Per session:** switching appends a `claude-bridge-account` custom entry, `{ id, name }`, with `pi.appendEntry`. The id is what is resolved; the name is only for the notice when the account is gone. On a top-level `session_start` (`new`, `resume`, `fork`, `reload`, and the first `startup`) the bridge applies the session's latest entry, or the default if there is none. A later `startup` is an in-process subagent session and leaves the active account alone, the same rule the bridge already uses for `AGENT_SESSION_ID`.
 - **Which directory a Claude Code session lives in:** the bridge's session state records the config directory its session file was written under. When a turn starts under a different account, the directories differ, and that turn rebuilds the session from pi's history in the new directory. No separate "mark for rebuild" signal is needed, and it works in every module copy. A turn captures the account once at its start and uses it throughout, so a switch mid-turn applies from the next turn.
 
 ### One resolver
@@ -187,7 +187,7 @@ Found by recording every page and redirect in a separate, clean Chrome profile (
 - **Panel**, following the `pi-typesafe-ai` panel tests: every line exactly the box width at several widths, a constant body height, navigation, and the add/switch/default/rename/remove flows with an injected sign-in runner and status reader. Subcommands work, and a bare command without a UI prints the list.
 
 **Integration tests**, in the `tests/int-*.mjs` harness against a real Claude Code:
-- **Recall across a switch:** plant a codeword on account A, switch to B, and confirm recall after a rebuild. This runs with one real login by pointing two accounts at the same directory, as PR #60's `int-profile-switch` does.
+- **Recall across a switch:** plant a codeword on the launch account, switch to a second account, and confirm recall after a rebuild. It needs a second signed-in config directory (`CLAUDE_BRIDGE_TESTING_SECOND_ACCOUNT_DIR`) and skips without one. Pointing a named account at `~/.claude` would not work: an explicit `~/.claude` is a different macOS Keychain entry from the unset default, so it reads as signed out.
 - **File placement:** session files land in the active account's directory.
 - **Browser launch contract:** `claude auth login`, run with the stand-in on `PATH`, calls it with a sign-in URL within a few seconds. This is killed before any browser opens. It guards the one assumption about how Claude Code opens the browser.
 
