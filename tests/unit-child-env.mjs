@@ -18,6 +18,33 @@ describe("Claude Code child environment", () => {
 		});
 	});
 
+	it("marks a stamped child as part of the hosting session", () => {
+		const env = __test.stampedChildEnv({ HOME: "/h" }, " pi-session ");
+		assert.equal(env.AGENT_SESSION_ID, "pi-session");
+		assert.equal(env.AGENT_SESSION_CHILD, "1");
+		assert.equal(env.HOME, "/h");
+	});
+
+	it("replaces an inherited id and marker with the captured id", () => {
+		const env = __test.stampedChildEnv(
+			{ AGENT_SESSION_ID: "stale", AGENT_SESSION_CHILD: "1" },
+			"pi-session",
+		);
+		assert.equal(env.AGENT_SESSION_ID, "pi-session");
+		assert.equal(env.AGENT_SESSION_CHILD, "1");
+	});
+
+	it("unsets an inherited id and marker when no id was captured", () => {
+		for (const captured of [undefined, "", "  "]) {
+			const env = __test.stampedChildEnv(
+				{ AGENT_SESSION_ID: "stale", AGENT_SESSION_CHILD: "1" },
+				captured,
+			);
+			assert.equal(env.AGENT_SESSION_ID, undefined);
+			assert.equal(env.AGENT_SESSION_CHILD, undefined);
+		}
+	});
+
 	// Deliberately not asserted here: that every `query()` call site spreads the
 	// constant. The only way to check that from a unit test is to grep src/index.ts,
 	// which fails on innocent indirection (`env: childEnv`) and would have to be
