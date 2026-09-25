@@ -144,7 +144,9 @@ Run with throwaway scripts against a scratch config directory; nothing from the 
 
 **Note from the spike:** the one failure was self-inflicted. The session told Court to move sign-in to a private window, and the URL copied there was an earlier run's. That run had already exited, so the browser's redirect to its localhost port got `ERR_CONNECTION_REFUSED`. Using the tab each run opens avoids it.
 
-**Open point for the live check:** confirm that Anthropic's sign-in page lets you choose a different account when the browser is already signed in to claude.ai. In the spike it asked for an email, but the already-signed-in case was not tested cleanly. If it only offers the current session, the fix is to sign out on that page, not to add anything to the panel.
+**Retest (same day):** using only the tab the command opened, in the normal browser window, Court signed a scratch directory in as the `subaud.io` account. It finished in 4.9 s, a one-click approval of the account the browser was already signed in as. So both page behaviors have been seen: asking for an email (first run) and one-click approval of the browser's current claude.ai account (retest).
+
+**Open point for the live check:** switching to a different account on Anthropic's page while the browser is signed in as another one has not been observed. That is the page's behavior, not the panel's. If it only offers the current account, the fix is to sign out on that page; nothing is added to the panel.
 
 ## Verification
 **Unit tests**
