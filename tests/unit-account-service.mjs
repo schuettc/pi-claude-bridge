@@ -3,7 +3,7 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -154,6 +154,39 @@ describe("remove", () => {
 		assert.equal(acc.getActiveAccount().id, "launch");
 		assert.ok(log.some((e) => e[0] === "signOut" && e[1] === "work"));
 		assert.deepEqual(log.at(-1), ["switch", "default"]);
+	});
+});
+
+describe("remove never deletes a folder the bridge did not create", () => {
+	it("keeps a hand-added folder outside accounts/ and says so", async () => {
+		const outside = mkdtempSync(join(tmpdir(), "hand-added-config-"));
+		try {
+			writeFileSync(join(outside, "keep.txt"), "user data");
+			acc.saveRegistry(root, { version: 1, default: "launch", accounts: [{ ...acc.LAUNCH_ACCOUNT }, { id: "h1", name: "hand", configDir: outside }] });
+			const r = await makeService().remove("hand");
+			assert.equal(r.ok, true);
+			assert.equal(r.value.keptFolder, outside);
+			assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "user data");
+			assert.equal(acc.byName(acc.loadRegistry(root).registry, "hand"), undefined);
+		} finally { rmSync(outside, { recursive: true, force: true }); }
+	});
+
+	it("keeps a sibling folder whose name only starts with accounts", async () => {
+		const sibling = join(root, "accounts-evil");
+		mkdirSync(sibling, { recursive: true });
+		writeFileSync(join(sibling, "keep.txt"), "user data");
+		acc.saveRegistry(root, { version: 1, default: "launch", accounts: [{ ...acc.LAUNCH_ACCOUNT }, { id: "h2", name: "sneaky", configDir: sibling }] });
+		const r = await makeService().remove("sneaky");
+		assert.equal(r.ok, true);
+		assert.equal(readFileSync(join(sibling, "keep.txt"), "utf8"), "user data");
+	});
+
+	it("still deletes the folder of an account it added", async () => {
+		const service = makeService();
+		const { value } = await service.add("work");
+		const r = await service.remove("work");
+		assert.equal(r.value.keptFolder, undefined);
+		assert.equal(existsSync(value.account.configDir), false);
 	});
 });
 

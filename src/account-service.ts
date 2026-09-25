@@ -1,8 +1,8 @@
 // Account operations shared by the /claude-account panel and its subcommands.
 // Every change reloads accounts.json just before writing it, so two panes
 // editing accounts do not overwrite each other's additions.
-import { mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
+import { join, relative, isAbsolute } from "node:path";
 import {
 	byId,
 	byName,
@@ -94,7 +94,7 @@ export class AccountService {
 		return result;
 	}
 
-	async remove(name: string): Promise<Result<{ switchedTo?: Account }>> {
+	async remove(name: string): Promise<Result<{ switchedTo?: Account; keptFolder?: string }>> {
 		const { registry, problem } = this.load();
 		if (problem) return fail(`The accounts file has a problem, so nothing was changed: ${problem}`);
 		const account = byName(registry, name);
@@ -107,7 +107,10 @@ export class AccountService {
 			return ok(current);
 		});
 		if (!saved.ok) return fail(reasonOf(saved));
-		rmSync(account.configDir!, { recursive: true, force: true });
+		// Only a folder the bridge created is deleted. accounts.json can be edited by
+		// hand, and a recursive delete of someone's real config folder is not undoable.
+		const keptFolder = this.#owns(account.configDir!) ? undefined : account.configDir!;
+		if (!keptFolder) rmSync(account.configDir!, { recursive: true, force: true });
 		let switchedTo: Account | undefined;
 		if (getActiveAccount().id === account.id) {
 			switchedTo = byId(saved.value, saved.value.default) ?? { ...LAUNCH_ACCOUNT };
@@ -116,7 +119,7 @@ export class AccountService {
 		} else {
 			this.#deps.onChange();
 		}
-		return ok({ switchedTo });
+		return ok({ switchedTo, keptFolder });
 	}
 
 	async add(name: string, onStart?: (run: SigninRun) => void): Promise<Result<{ account: Account } & SigninOutcome>> {
@@ -162,6 +165,18 @@ export class AccountService {
 		const status = await this.#deps.readStatus(account);
 		if (!status.loggedIn) return fail(`Sign-in didn't finish: ${status.problem ?? "Claude Code reports no login for this account"}`);
 		return ok({ status, rewritten: result.rewritten });
+	}
+
+	/** Whether `dir` really lies inside <root>/accounts/ (symlinks and .. resolved). */
+	#owns(dir: string): boolean {
+		const real = (path: string) => {
+			try { return realpathSync(path); } catch { return undefined; }
+		};
+		const base = real(join(this.#deps.root, "accounts"));
+		const target = real(dir);
+		if (!base || !target) return false;
+		const rel = relative(base, target);
+		return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 	}
 
 	#mutate<T>(change: (registry: Registry) => Result<T>): Result<T> {

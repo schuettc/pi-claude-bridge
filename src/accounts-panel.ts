@@ -258,7 +258,7 @@ export class AccountsPanel implements Component {
 		const result = await this.#o.service.remove(target.name);
 		this.#reload();
 		this.#message = result.ok
-			? { kind: "ok", text: `Removed ${target.name}.${result.value.switchedTo ? ` This session now uses ${result.value.switchedTo.name}.` : ""}` }
+			? { kind: "ok", text: `Removed ${target.name}.${result.value.switchedTo ? ` This session now uses ${result.value.switchedTo.name}.` : ""}${result.value.keptFolder ? ` Its folder was kept: ${result.value.keptFolder}` : ""}` }
 			: { kind: "error", text: result.reason };
 	}
 

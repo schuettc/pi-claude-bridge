@@ -149,7 +149,8 @@ export function registerAccounts(pi: ExtensionAPI, deps: AccountsWiringDeps = {}
 			}
 			const result = await service.remove(arg);
 			const moved = result.ok && result.value.switchedTo ? ` This session now uses ${result.value.switchedTo.name}.` : "";
-			return report(result, `Removed ${arg}.${moved}`);
+			const kept = result.ok && result.value.keptFolder ? ` Its folder was kept: ${result.value.keptFolder}` : "";
+			return report(result, `Removed ${arg}.${moved}${kept}`);
 		}
 		// `/claude-account default` alone switches to the account named default.
 		const name = sub === "use" ? arg : sub;
