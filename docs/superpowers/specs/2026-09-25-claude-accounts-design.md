@@ -70,7 +70,10 @@ No copying or pasting at any point.
 1. Adding an account asks for a name inside the box.
 2. The bridge creates `~/.pi/agent/claude-bridge/accounts/<name>/`.
 3. It runs `claude auth login --claudeai` with `CLAUDE_CONFIG_DIR` set to that directory. This is the command-line form of Claude Code's `/login`. Its stdio is piped, with no terminal attached, which the spike showed works. The browser opens Anthropic's sign-in page, and you choose the account and sign in there.
-4. While it waits, the panel shows `waiting for browser sign-in… · esc cancel`. Esc kills the command and cleans up (see Errors); to try again, start the add again.
+4. While it waits, the panel shows `waiting for browser sign-in… · r restart · esc cancel`, with the dim hint `Switched account on the page? Press r.`
+   - **`r`** stops the running command and starts a fresh one, which opens a fresh tab. It exists for one observed case (see Spike results): switching accounts on Anthropic's page goes through an emailed link, and that link returns the browser to a stale sign-in request instead of the one waiting. The browser is left signed in as the new account, so the fresh tab shows a one-click Authorize for it.
+   - **Esc** kills the command and cleans up (see Errors).
+   - **Stopping a run** (`r`, Esc, the panel closing, pi exiting) kills the `claude` process itself and its process group. The spike showed that killing only a parent left `claude auth login` running and still listening on its port.
 5. When the command exits 0, the bridge runs `claude auth status --json` against the directory. It then shows the email and plan and adds the row.
 
 Signing an account in again (a `signed out` row) runs the same flow against that account's directory.
@@ -142,11 +145,15 @@ Run with throwaway scripts against a scratch config directory; nothing from the 
 3. **Separate accounts: yes.** With a second account signed in, the two directories report different emails and orgs. `claude auth logout` on the scratch directory left the launch login signed in.
 4. **Usage follows the directory: yes.** The bridge's usage-refresh shape (a no-prompt SDK query with `accountInfo()` and the usage control call) reports the right account and plan for each directory. `rate_limits` is `null` for both, including the launch login, before any turn. That is existing behavior, and the live check covers the per-turn rate-limit snapshots.
 
-**Note from the spike:** the one failure was self-inflicted. The session told Court to move sign-in to a private window, and the URL copied there was an earlier run's. That run had already exited, so the browser's redirect to its localhost port got `ERR_CONNECTION_REFUSED`. Using the tab each run opens avoids it.
+**Second run's failure:** after a detour through a private window, the browser was sent to `localhost:64817/callback`, a port no run was listening on, and got `ERR_CONNECTION_REFUSED`. At the time this was blamed on copying an earlier run's URL. The fourth run showed the real cause (below).
 
 **Retest (same day):** using only the tab the command opened, in the normal browser window, Court signed a scratch directory in as the `subaud.io` account. It finished in 4.9 s, a one-click approval of the account the browser was already signed in as. So both page behaviors have been seen: asking for an email (first run) and one-click approval of the browser's current claude.ai account (retest).
 
-**Open point for the live check:** switching to a different account on Anthropic's page while the browser is signed in as another one has not been observed. That is the page's behavior, not the panel's. If it only offers the current account, the fix is to sign out on that page; nothing is added to the panel.
+**Switching accounts on the page (third and fourth runs):** with the browser signed in as `subaud.io`, the command's tab showed `Logged in as … · Authorize · Switch account`. Court used Switch account, entered the other email and clicked the emailed link. The browser then went to `localhost:64817/callback` with the **same** `state` as the very first failure (`5xMRO1…`), not to the waiting run's port (65292), and got `ERR_CONNECTION_REFUSED`. The emailed link resumes a stale sign-in request on Anthropic's side, reproducibly. A fresh run then showed `Logged in as court@workshop.institute · Authorize` and finished in 16 s with the right account. This is why the waiting screen has `r restart`.
+
+The second run's failure carried the same `state` and port, so it was this stale-link behavior too.
+
+**The browser holds one claude.ai account at a time**, the last one signed in. Adding an account whose email differs from the browser's current one therefore usually takes Switch account → emailed link → `r` → Authorize. This affects only sign-in, which happens once per account. Each directory's Claude Code login is independent of the browser: two directories stayed signed in to different accounts at once, and signing one out left the other intact.
 
 ## Verification
 **Unit tests**
