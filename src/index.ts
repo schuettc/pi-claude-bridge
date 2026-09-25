@@ -37,6 +37,7 @@ import {
 	type ProviderUsageSnapshotV1,
 } from "./usage-bus.js";
 import { accountClaudeDir, accountEnv, getActiveAccount, signedOutText } from "./accounts.js";
+import { registerAccounts } from "./account-command.js";
 import {
 	notifyWithStandaloneSessionPolicy,
 	resetStandaloneWarningState,
@@ -2422,6 +2423,9 @@ const PREVIEW_MAX_LINES = 6;
 let askClaudeToolName = "AskClaude";
 
 export default function (pi: ExtensionAPI) {
+	// First, so the bridge's own handlers are registered after it: some unit-test
+	// hosts keep only the last handler per event.
+	registerAccounts(pi);
 	// Disable non-essential Claude Code traffic (update checks, MCP registry, telemetry)
 	process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
 
