@@ -71,9 +71,9 @@ No copying or pasting at any point.
 2. The bridge creates `~/.pi/agent/claude-bridge/accounts/<name>/`.
 3. It runs `claude auth login --claudeai --email <email>` with `CLAUDE_CONFIG_DIR` set to that directory. This is the command-line form of Claude Code's `/login`. Its stdio is piped, with no terminal attached, which the spike showed works. The browser opens with the email filled in, and you finish signing in there.
 4. While it waits, the panel shows `waiting for browser sign-in… · o reopen page · esc cancel`.
-   - **`o`** reopens the current run's sign-in page, using the URL the command prints, with the system `open`. A lost or closed tab never means copying a URL. Each run listens on its own random localhost port, so an old run's tab can't finish a new run's sign-in; `o` always opens the live one.
+   - **`o`** restarts sign-in: it stops the running command and starts a fresh one, which opens a fresh tab. A lost or closed tab never means copying a URL. Each run listens on its own random localhost port, so an old run's tab can't finish a new run's sign-in; after `o`, only the newest tab is live.
    - **Esc** kills the command and cleans up (see Errors).
-   - **The URL is shown in the box only when no browser can be opened.**
+   - The URL the command prints is not used. It is the paste-a-code variant (`redirect_uri` = `platform.claude.com/oauth/code/callback`), and opening it would ask for a pasted code.
 5. When the command exits 0, the bridge runs `claude auth status --json` against the directory. It then shows the email and plan and adds the row.
 
 Signing an account in again (a `signed out` row) runs the same flow, with the email taken from the last `claude auth status` recorded for it.
@@ -141,7 +141,7 @@ Run with throwaway scripts against a scratch config directory; nothing from the 
 3. **Separate accounts: yes.** With a second account signed in, the two directories report different emails and orgs. `claude auth logout` on the scratch directory left the launch login signed in.
 4. **Usage follows the directory: yes.** The bridge's usage-refresh shape (a no-prompt SDK query with `accountInfo()` and the usage control call) reports the right account and plan for each directory. `rate_limits` is `null` for both, including the launch login, before any turn. That is existing behavior, and the live check covers the per-turn rate-limit snapshots.
 
-**Lesson from the spike:** a stale sign-in tab from an earlier run sends the browser to a closed localhost port and gets `ERR_CONNECTION_REFUSED`. This is why `o` reopens the live page and why the email is pre-filled, so choosing the account never depends on which claude.ai session the browser holds.
+**Lesson from the spike:** a stale sign-in tab from an earlier run sends the browser to a closed localhost port and gets `ERR_CONNECTION_REFUSED`. This is why `o` restarts sign-in with a fresh tab and why the email is pre-filled, so choosing the account never depends on which claude.ai session the browser holds.
 
 ## Verification
 **Unit tests**
