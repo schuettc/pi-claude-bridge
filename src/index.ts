@@ -83,10 +83,17 @@ const CC_CHILD_ENV = {
 // hosting session. MUSTER_HOOK_DISABLE covers only the hook path, not the MCP
 // caller-identity path, so this stamping is still load-bearing. An empty
 // captured id unsets the key so a stale inherited value never leaks through.
+//
+// AGENT_SESSION_CHILD=1 marks the child as part of the hosting session, so
+// tools-common's harness rule prefers AGENT_SESSION_ID over the child's own
+// CLAUDE_CODE_SESSION_ID. It is set only alongside a stamped id and unset
+// otherwise, so an inherited marker never outlives the id it vouched for.
 function stampedChildEnv(base: NodeJS.ProcessEnv, captured: string | undefined): Record<string, string | undefined> {
+	const id = captured?.trim() || undefined;
 	return {
 		...base,
-		AGENT_SESSION_ID: captured?.trim() || undefined,
+		AGENT_SESSION_ID: id,
+		AGENT_SESSION_CHILD: id ? "1" : undefined,
 		...CC_CHILD_ENV,
 	};
 }
@@ -851,6 +858,7 @@ export const __test = {
 	deliverToolResults,
 	drainForAbort,
 	CC_CHILD_ENV,
+	stampedChildEnv,
 	buildMcpServers,
 	branchSummaryOutcome,
 	get promptCaptures() {
