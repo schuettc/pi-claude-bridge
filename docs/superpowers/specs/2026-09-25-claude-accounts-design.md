@@ -68,7 +68,7 @@ Without the interactive TUI, a bare `/claude-account` prints the list.
 Only normal clicks, in your normal browser. No copying or pasting at any point.
 
 1. Adding an account asks for a name inside the box.
-2. The bridge creates `~/.pi/agent/claude-bridge/accounts/<name>/`.
+2. The bridge creates `~/.pi/agent/claude-bridge/accounts/<id>/`, where `<id>` is a new random id (see State).
 3. It runs `claude auth login --claudeai` with `CLAUDE_CONFIG_DIR` set to that directory. This is the command-line form of Claude Code's `/login`. Its stdio is piped, with no terminal attached, which the spike showed works.
 4. **The browser goes through claude.ai's logout first.** `claude auth login` opens its sign-in page by running `open <url>`. The bridge puts a bridge-owned directory first on the command's `PATH`, holding an `open` stand-in:
    - For the sign-in URL (`https://claude.com/cai/oauth/authorize?<query>` or `https://claude.ai/oauth/authorize?<query>`), it opens `https://claude.ai/logout?returnTo=<url-encoded /oauth/authorize?<query>>` with `/usr/bin/open`.
@@ -100,20 +100,25 @@ The login pi was launched with becomes the first account automatically, named `d
 ## Design
 
 ### State
-- **Registry:** `~/.pi/agent/claude-bridge/accounts.json`, written atomically with mode 0600, and never holding credentials:
+- **Registry:** `<pi agent dir>/claude-bridge/accounts.json` (normally `~/.pi/agent/claude-bridge/accounts.json`), written atomically with mode 0600, and never holding credentials:
   ```json
-  { "version": 1, "default": "work",
-    "accounts": [ { "name": "default", "configDir": null },
-                  { "name": "work", "configDir": "~/.pi/agent/claude-bridge/accounts/work" } ] }
+  { "version": 1, "default": "k3v9qd",
+    "accounts": [ { "id": "launch", "name": "default", "configDir": null },
+                  { "id": "k3v9qd", "name": "work", "configDir": "/Users/you/.pi/agent/claude-bridge/accounts/k3v9qd" } ] }
   ```
-  `configDir: null` means "the login pi was launched with". A missing file means only that account exists.
-- **Names:** `^[a-z0-9][a-z0-9-]{0,31}$`, unique.
+  - `configDir: null` means "the login pi was launched with". A missing file means only that account exists.
+  - `configDir` is an absolute path.
+- **Ids, not names, for anything durable:** each account has a random id (`launch` for the launch login), used for its config directory, for `default`, and in session entries.
+  - **A config directory never moves.** macOS keys a Claude Code login's Keychain entry by the config directory's path, so moving or renaming the directory would sign the account out.
+  - **Renaming changes only `name`.** Sessions and the default keep pointing at the same account.
+- **Names:** `^[a-z0-9][a-z0-9-]{0,31}$`, unique; they are labels only.
 - **Active account:** one per pi process, held in a new module `src/accounts.ts` on a versioned `globalThis` symbol. A subagent that loads a separate copy of the bridge module therefore sees its parent's account. One pi process has one top-level session open at a time, which matches the bridge's existing process-wide model (one `sharedSession`).
-- **Per session:** switching appends a `claude-bridge-account` custom entry, `{ name }`, with `pi.appendEntry`. On `session_start` (new, resume, fork, reload) the bridge applies the session's latest entry, or the default if there is none.
+- **Per session:** switching appends a `claude-bridge-account` custom entry, `{ id }`, with `pi.appendEntry`. On a top-level `session_start` (`new`, `resume`, `fork`, `reload`, and the first `startup`) the bridge applies the session's latest entry, or the default if there is none. A later `startup` is an in-process subagent session and leaves the active account alone, the same rule the bridge already uses for `AGENT_SESSION_ID`.
+- **Which directory a Claude Code session lives in:** the bridge's session state records the config directory its session file was written under. When a turn starts under a different account, the directories differ, and that turn rebuilds the session from pi's history in the new directory. No separate "mark for rebuild" signal is needed, and it works in every module copy. A turn captures the account once at its start and uses it throughout, so a switch mid-turn applies from the next turn.
 
 ### One resolver
 `src/accounts.ts` exports `accountEnv(base)` and `accountClaudeDir()`. Every account-scoped place in `src/index.ts` goes through them:
-- **Child environment:** `stampedChildEnv` (every Claude Code child: provider turns, AskClaude, compaction summary, side requests, the usage refresh) takes the child's environment from `accountEnv`.
+- **Child environment:** every Claude Code child (provider turns, AskClaude, compaction summary, side requests, the usage refresh) gets `accountEnv(stampedChildEnv(process.env, …), account)`. `stampedChildEnv` itself stays account-agnostic.
   - **Launch-login account:** the environment is exactly as today.
   - **Named account:** sets `CLAUDE_CONFIG_DIR` and removes inherited `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`. PR #60 verified that an environment token outranks a config directory's stored login, so leaving one in place would put every account on one login.
 - **Session files:** `openSession`, `createSession` and `deleteSession` (today `process.env.CLAUDE_CONFIG_DIR` at `src/index.ts` 283, 781, 785, 824, 2131, 2186) take `accountClaudeDir()`. The debug and diagnostic lines (655, 660, 684) report the resolved directory and account name.
@@ -122,8 +127,8 @@ The login pi was launched with becomes the first account automatically, named `d
 
 ### Switching
 1. Set the active account and append the session entry.
-2. Mark the shared session for a rotated rebuild (`needsRebuild` + `forceRotate`). The next turn then writes a fresh Claude Code session from pi's history into the new account's directory, through the existing rebuild path. The old account's file is left alone; another pane may own it.
-3. Re-bind the usage adapter (`bindClaudeUsageAdapterOwner`), whose environment is otherwise captured once at session start (`src/index.ts:1131`). The meter then reports the new account.
+2. The next turn sees that the shared session's recorded directory differs from the active account's and rebuilds a fresh Claude Code session (new id) from pi's history in the new directory, through the existing rebuild path. The old account's file is left alone; another pane may own it.
+3. The usage refresh applies the active account to its environment at each refresh, instead of relying only on the environment captured once at session start (`src/index.ts:1131`). The meter then reports the new account with no re-binding.
 4. Update the footer status.
 
 A switch requested during a turn applies from the next turn. The turn in progress finishes on its account.
