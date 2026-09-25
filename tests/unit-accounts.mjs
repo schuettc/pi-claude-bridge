@@ -165,7 +165,16 @@ describe("signed-out text", () => {
 	it("names the account for Claude Code's not-logged-in error", () => {
 		assert.equal(acc.signedOutText("Not logged in · Please run /login", work), 'Claude account "work" is signed out. /claude-account to sign in again.');
 	});
+	it("recognizes Claude Code's other login failures, which end in 'Please run /login'", () => {
+		for (const text of ["OAuth token revoked · Please run /login", "Invalid API key · Please run /login"]) {
+			assert.equal(acc.signedOutText(text, work), 'Claude account "work" is signed out. /claude-account to sign in again.', text);
+		}
+	});
+	it("recognizes the error when the SDK throws it with a prefix", () => {
+		assert.ok(acc.signedOutText("Claude Code returned an error result: Not logged in · Please run /login", work));
+	});
 	it("leaves other errors alone", () => {
 		assert.equal(acc.signedOutText("API Error: 500", work), undefined);
+		assert.equal(acc.signedOutText("Claude rate limit (five_hour): You're out of extra usage", work), undefined);
 	});
 });

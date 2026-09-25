@@ -184,9 +184,12 @@ export function restoreAccount(
 	return { account: fallback };
 }
 
-/** Claude Code's not-logged-in error, restated with the account name. */
+/** Claude Code's login failures, restated with the account name. Observed:
+ *  "Not logged in · Please run /login"; its other auth failures (revoked or
+ *  invalid credentials) end the same way. The SDK can also throw the text with
+ *  a prefix, so it is matched anywhere. */
 export function signedOutText(text: string, account: Account): string | undefined {
-	return /^Not logged in\b/.test(text)
+	return /\bNot logged in\b|Please run \/login\b/.test(text)
 		? `Claude account "${account.name}" is signed out. /claude-account to sign in again.`
 		: undefined;
 }
