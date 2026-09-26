@@ -192,3 +192,12 @@ Found by recording every page and redirect in a separate, clean Chrome profile (
 - **Browser launch contract:** `claude auth login`, run with the stand-in on `PATH`, calls it with a sign-in URL within a few seconds. This is killed before any browser opens. It guards the one assumption about how Claude Code opens the browser.
 
 **Live check** with two real logins: switch personal → work → personal in one session. History should survive, `claude auth status` should confirm each account, and the usage meter should follow.
+
+## Live check (2026-09-25)
+Run by Court with `pi -ne -e <worktree>` on branch `feat/claude-accounts`, Claude Code 2.1.282. All steps passed:
+1. The panel listed the launch login as `default` with its email and plan.
+2. Added `subaud` from the panel: the browser went through claude.ai's logout to Claude's login page; email link, Authorize; the row showed `court@subaud.io · Max`.
+3. With the browser signed in as `subaud.io`, added and signed in a throwaway account as `court@workshop.institute` with no restart and no copying, then removed it. This was the case that failed before the logout-with-returnTo fix.
+4. Switched mid-conversation from `default` to `subaud`: the codeword was recalled, the footer showed `claude: subaud`, and the usage meter followed.
+5. Resumed the session in another pane: it came back on `subaud`.
+6. `tests/int-account-switch.mjs` with `CLAUDE_BRIDGE_TESTING_SECOND_ACCOUNT_DIR` set to `subaud`'s folder: pass.
