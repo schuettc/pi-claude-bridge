@@ -18,3 +18,8 @@ import { join } from "node:path";
 const logDir = mkdtempSync(join(tmpdir(), "claude-bridge-test-log-"));
 process.env.CLAUDE_BRIDGE_DEBUG_PATH = join(logDir, "claude-bridge.log");
 process.on("exit", () => rmSync(logDir, { recursive: true, force: true }));
+// Accounts and bridge config resolve under the pi agent dir; never read the
+// developer's real ~/.pi/agent from a unit test.
+const agentDir = mkdtempSync(join(tmpdir(), "claude-bridge-test-agent-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
+process.on("exit", () => rmSync(agentDir, { recursive: true, force: true }));
