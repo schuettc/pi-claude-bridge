@@ -7,15 +7,21 @@ import { readFileSync } from "node:fs";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown } from "../src/config.js";
 
+// The unit suite sets PI_CODING_AGENT_DIR (tests/lib/setup.mjs), which outranks
+// HOME, so each temp home also gets its own agent dir.
 function withTempHome(fn) {
 	const oldHome = process.env.HOME;
+	const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const home = mkdtempSync(join(tmpdir(), "claude-bridge-home-"));
 	try {
 		process.env.HOME = home;
+		process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
 		return fn(home);
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
 		else process.env.HOME = oldHome;
+		if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
 		rmSync(home, { recursive: true, force: true });
 	}
 }
