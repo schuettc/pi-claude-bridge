@@ -99,6 +99,17 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 
 **Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not currently apply to extension-registered providers (like claude-bridge). Overriding `contextWindow` or other fields requires editing `src/models.ts` directly — to pin a model to 200K, use `provider.forceTwoHundredK` instead.
 
+## Multiple Claude accounts
+
+Type `/claude-account` to open the accounts panel. Each session uses one account; two panes can use different ones at the same time, and a resumed session goes back to the account it last used.
+
+- **Add an account:** choose `+ Add account` and type a name. Your browser opens Claude's sign-in page (it signs the browser out of claude.ai first, so you can pick any account). Enter the account's email, click the link in the email, then Authorize.
+- **Switch this session:** select an account and press Enter. It takes effect on the next turn; the first turn after a switch sends the full history once, because the prompt cache belongs to the account.
+- **Other keys:** `d` makes an account the default for new sessions, `r` renames, `x` removes (signs it out and deletes its folder).
+- **Without the panel:** `/claude-account <name>`, `/claude-account add <name>`, `/claude-account default <name>`, `/claude-account list`, `/claude-account remove <name>`.
+
+Your existing login appears as `default` and is used until you add another account. Each added account is a Claude Code config directory under `~/.pi/agent/claude-bridge/accounts/`; the bridge never reads or stores credentials. Signing in is supported on macOS.
+
 ## Tests
 
 `npm run test:unit` for offline tests (`tests/unit-*.mjs`: queue, import, skills). 

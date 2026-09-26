@@ -36,6 +36,8 @@ import {
 	type ProviderUsageEventV1,
 	type ProviderUsageSnapshotV1,
 } from "./usage-bus.js";
+import { accountClaudeDir, accountEnv, getActiveAccount, signedOutText } from "./accounts.js";
+import { registerAccounts } from "./account-command.js";
 import {
 	notifyWithStandaloneSessionPolicy,
 	resetStandaloneWarningState,
@@ -189,8 +191,18 @@ let unregisterClaudeUsageAdapter: (() => void) | undefined;
 
 // The most recent COMPLETE inline usage snapshot parsed from an SDK rate_limit_event's
 // `unifiedWindows`. The registered usage adapter prefers this over polling so the meter
-// reflects the freshest data the inference stream already delivered.
-let lastInlineUsageSnapshot: ProviderUsageSnapshotV1 | undefined;
+// reflects the freshest data the inference stream already delivered. Kept per
+// account: after a switch, another account's snapshot would be the wrong meter.
+const inlineUsageSnapshots = new Map<string, ProviderUsageSnapshotV1>();
+
+function setInlineUsageSnapshot(snapshot: ProviderUsageSnapshotV1 | undefined): void {
+	if (snapshot === undefined) inlineUsageSnapshots.clear();
+	else inlineUsageSnapshots.set(getActiveAccount().id, snapshot);
+}
+
+function cachedUsageForActiveAccount(): ProviderUsageSnapshotV1 | undefined {
+	return inlineUsageSnapshots.get(getActiveAccount().id);
+}
 
 // Ours among pi-ai's api-provider registrations, so shutdown removes only the one
 // this module instance made. Per instance, not per package: a subagent instance
@@ -270,6 +282,10 @@ interface SessionState {
 	// this — there's no concurrent CC writer during those events, so
 	// in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
+	// The Claude Code config directory this session's file lives under
+	// (undefined = the launch login's default). A turn under a different
+	// account cannot resume it, so syncSharedSession rebuilds in the new one.
+	claudeDir?: string;
 }
 
 /**
@@ -278,9 +294,9 @@ interface SessionState {
  * Must be called before `deleteSession`, which wipes the file they live in —
  * reading after it yields nothing, with no error to notice.
  */
-function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachment[] {
+function readCarriedAttachments(sessionId: string, cwd: string, claudeDir: string | undefined): CarriedAttachment[] {
 	try {
-		const previous = openSession({ sessionId, projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR });
+		const previous = openSession({ sessionId, projectPath: cwd, claudeDir });
 		return collectCarriedAttachments(previous.records);
 	} catch (error) {
 		// A post-abort rebuild reads a file the killed CC subprocess may have been
@@ -471,12 +487,17 @@ function extractIsolatedSummaryPrompt(messages: Context["messages"]): string {
 /** Failure text for an SDK result, or undefined when it succeeded. CC reports API failures
  *  (429 capacity, overload, prompt-too-long) with `is_error` on an otherwise success-shaped
  *  result; the dedicated error subtypes carry `errors` instead. */
-function resultErrorText(message: SDKMessage): string | undefined {
+function rawResultErrorText(message: SDKMessage): string | undefined {
 	const result = message as SDKMessage & { subtype?: string; is_error?: boolean; result?: string; errors?: unknown; error?: unknown };
 	if (result.subtype === "success") return result.is_error ? result.result || "Claude Code reported an error" : undefined;
 	if (Array.isArray(result.errors) && result.errors.length) return result.errors.map(String).join("\n");
 	if (typeof result.error === "string") return result.error;
 	return `Claude Code failed: ${result.subtype ?? "unknown result"}`;
+}
+
+function resultErrorText(message: SDKMessage): string | undefined {
+	const text = rawResultErrorText(message);
+	return text === undefined ? undefined : signedOutText(text, getActiveAccount()) ?? text;
 }
 
 /** Name a failure as a rate limit when a rejection preceded it.
@@ -543,7 +564,7 @@ async function runIsolatedSummary(
 			prompt: promptText,
 			options: {
 				cwd,
-				env: stampedChildEnv(process.env, piSessionId),
+				env: accountEnv(stampedChildEnv(process.env, piSessionId), getActiveAccount()),
 				settings: { autoMemoryEnabled: false },
 				tools: [],
 				strictMcpConfig: true,
@@ -652,12 +673,12 @@ function verifyWrittenSession(
 		debug(`WARNING session verify: ${msg}`);
 		piUI?.notify(
 			`Session file issue: ${msg}\n` +
-			`cwd=${cwd} realpath=${safeRealpath(cwd)} CLAUDE_CONFIG_DIR=${process.env.CLAUDE_CONFIG_DIR ?? "(unset)"}\n` +
+			`cwd=${cwd} realpath=${safeRealpath(cwd)} account=${getActiveAccount().name} CLAUDE_CONFIG_DIR=${accountClaudeDir(getActiveAccount()) ?? "(unset)"}\n` +
 			`Please copy and paste this message into a new issue at https://github.com/elidickinson/pi-claude-bridge/issues/new` +
 			(DEBUG ? ` and attach ${DEBUG_LOG_PATH}` : ` (rerun with CLAUDE_BRIDGE_DEBUG=1 to capture a debug log)`),
 			"warning",
 		);
-		diagDump("session_verify_fail", { msg, jsonlPath, cwd, realpath: safeRealpath(cwd), claudeConfigDir: process.env.CLAUDE_CONFIG_DIR ?? null });
+		diagDump("session_verify_fail", { msg, jsonlPath, cwd, realpath: safeRealpath(cwd), claudeConfigDir: accountClaudeDir(getActiveAccount()) ?? null });
 	}
 }
 
@@ -681,7 +702,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	if (realCwd !== cwd) debug(`${label}: realpath(cwd)=${realCwd} (DIFFERS — symlink-resolved path is what CC SDK uses)`);
 	debug(`${label}: jsonlPath=${jsonlPath}`);
 	debug(`${label}: fileExists=${fileExists}${fileSize != null ? ` size=${fileSize}` : ""}`);
-	debug(`${label}: env.CLAUDE_CONFIG_DIR=${process.env.CLAUDE_CONFIG_DIR ?? "(unset)"} HOME=${process.env.HOME ?? "(unset)"}`);
+	debug(`${label}: account=${getActiveAccount().name} claudeDir=${accountClaudeDir(getActiveAccount()) ?? "(unset)"} HOME=${process.env.HOME ?? "(unset)"}`);
 }
 
 // Two semantic paths:
@@ -714,6 +735,7 @@ function syncSharedSession(
 	cwd: string,
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
+	claudeDir: string | undefined = accountClaudeDir(getActiveAccount()),
 ): SyncResult {
 	// System messages are pi's transcript representation of prompt and tool state, not
 	// conversation history — they are never imported into a CC session, so exclude them from
@@ -728,7 +750,7 @@ function syncSharedSession(
 	// pi-side history rewrites such as /compact and session_tree: without it,
 	// missed = [].slice(cursor) can falsely hit REUSE and resume an unrelated
 	// longer CC session. See issue #25.
-	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length >= sharedSession.cursor) {
+	if (sharedSession && !sharedSession.needsRebuild && sharedSession.claudeDir === claudeDir && priorMessages.length >= sharedSession.cursor) {
 		const missed = priorMessages.slice(sharedSession.cursor);
 		const trailingAssistantOnly =
 			missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
@@ -769,20 +791,26 @@ function syncSharedSession(
 	}
 	const previousSessionId = sharedSession?.sessionId;
 	const previousCursor = sharedSession?.cursor ?? 0;
+	const previousDir = sharedSession?.claudeDir;
+	// A session in another account's directory is left alone (another pane may
+	// own it) and replaced by a new id here: rebuilding in place is only safe
+	// within one directory.
+	const sameDir = previousSessionId !== undefined && previousDir === claudeDir;
 	// preserveId: rebuild in place (deleteSession + createSession with the
 	// existing UUID), so prompt-cache UUIDs stay stable for log correlation
 	// and for any tools that key off them. Skipped only when there's a
-	// concurrent writer we shouldn't race — see forceRotate docs above.
-	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
+	// concurrent writer we shouldn't race — see forceRotate docs above — or
+	// when the account changed.
+	const preserveId = sameDir && !sharedSession?.forceRotate;
 	// Before deleteSession — it wipes the file these live in.
-	const carried = previousSessionId !== undefined ? readCarriedAttachments(previousSessionId, cwd) : [];
+	const carried = previousSessionId !== undefined ? readCarriedAttachments(previousSessionId, cwd, previousDir) : [];
 	if (preserveId) {
 		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
-		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
+		deleteSession(previousSessionId!, cwd, claudeDir);
 	}
 	const session = createSession({
 		projectPath: cwd,
-		claudeDir: process.env.CLAUDE_CONFIG_DIR,
+		claudeDir,
 		...(preserveId ? { sessionId: previousSessionId } : {}),
 		...(modelId ? { model: modelId } : {}),
 	});
@@ -791,7 +819,7 @@ function syncSharedSession(
 	// records, not messages: `messages` filters out the attachment records that
 	// carrying an `@file` expansion across a rebuild writes into the same file.
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
-	sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
+	sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd, claudeDir };
 	if (previousSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.records.length} records`);
 	} else if (preserveId) {
@@ -801,7 +829,7 @@ function syncSharedSession(
 		debug(`Case 4 post-abort: ${priorMessages.length} total → new session ${session.sessionId.slice(0, 8)} (was ${previousSessionId.slice(0, 8)}, rotated to avoid race with orphan writer), ${session.records.length} records`);
 	}
 	debugSessionPaths(`${session.sessionId.slice(0, 8)}`, cwd, session.jsonlPath);
-	debug(`syncResult: path=rebuild sessionId=${session.sessionId} priors=${priorMessages.length} ${previousSessionId === undefined ? "first" : preserveId ? "preserved" : "rotated-post-abort"}`);
+	debug(`syncResult: path=rebuild sessionId=${session.sessionId} priors=${priorMessages.length} ${previousSessionId === undefined ? "first" : preserveId ? "preserved" : sameDir ? "rotated-post-abort" : "rotated-account"}`);
 	return { sessionId: session.sessionId };
 }
 
@@ -818,10 +846,11 @@ function buildSideRequestSession(
 	cwd: string,
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
+	claudeDir: string | undefined = accountClaudeDir(getActiveAccount()),
 ): string {
 	const session = createSession({
 		projectPath: cwd,
-		claudeDir: process.env.CLAUDE_CONFIG_DIR,
+		claudeDir,
 		...(modelId ? { model: modelId } : {}),
 	});
 	convertAndImportMessages(session, priorMessages, customToolNameToSdk, []);
@@ -833,6 +862,8 @@ function buildSideRequestSession(
 
 // @internal
 export const __test = {
+	setInlineUsageSnapshot,
+	cachedUsageForActiveAccount,
 	resetSharedSession() {
 		sharedSession = null;
 	},
@@ -1195,7 +1226,9 @@ async function refreshClaudeUsage(
 			prompt: emptyUsagePrompt(),
 			options: {
 				cwd: dependencies.cwd,
-				env: dependencies.env,
+				// The environment was captured at session start; the account can have
+				// changed since, so apply the active one at each refresh.
+				env: accountEnv(dependencies.env, getActiveAccount()),
 				abortController,
 				tools: [],
 				strictMcpConfig,
@@ -1601,7 +1634,7 @@ async function consumeQuery(
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
 			const snapshot = snapshotFromClaudeRateLimitInfo(info);
-			if (snapshot?.complete) lastInlineUsageSnapshot = snapshot;
+			if (snapshot?.complete) setInlineUsageSnapshot(snapshot);
 			if (info?.status === "allowed") {
 				if (snapshot) publishProviderUsage({ version: 1, type: "snapshot", snapshot });
 				continue;
@@ -1946,6 +1979,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.latestCursor = 0;
 
 	const cwd = process.cwd();
+	// The account is captured once per turn: a switch mid-turn applies from the next one.
+	const account = getActiveAccount();
+	const claudeDir = accountClaudeDir(account);
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
 	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
 	const cliModel = claudeCodeModelId(model, longContextSettings);
@@ -1957,11 +1993,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const syncResult: SyncResult = side
 		? {
 			sessionId: sidePriorMessages.length > 0
-				? buildSideRequestSession(sidePriorMessages, cwd, customToolNameToSdk, cliModel)
+				? buildSideRequestSession(sidePriorMessages, cwd, customToolNameToSdk, cliModel, claudeDir)
 				: null,
 			preserveSharedSession: true,
 		}
-		: syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
+		: syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, claudeDir);
 	const { sessionId: resumeSessionId } = syncResult;
 	const promptBlocks = extractUserPromptBlocks(context.messages);
 	let promptText = extractUserPrompt(context.messages) ?? "";
@@ -2032,7 +2068,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = stampedChildEnv(process.env, piSessionId);
+	const childEnv = accountEnv(stampedChildEnv(process.env, piSessionId), account);
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,
@@ -2128,14 +2164,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			const sessionId = capturedSessionId ?? sharedSession?.sessionId;
 			if (syncResult.preserveSharedSession) {
 				if (capturedSessionId && capturedSessionId !== sharedSession?.sessionId) {
-					deleteSession(capturedSessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
+					deleteSession(capturedSessionId, cwd, claudeDir);
 					debug(`provider: query done, deleted ephemeral session ${capturedSessionId.slice(0, 8)} to preserve shared session`);
 				}
 				debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
 			} else if (sessionId) {
 				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
 				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
-				sharedSession = { sessionId, cursor, cwd };
+				sharedSession = { sessionId, cursor, cwd, claudeDir };
 			}
 
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
@@ -2161,7 +2197,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				queryCtx.turnOutput.stopReason = options?.signal?.aborted ? "aborted" : "error";
 				// The SDK drops its copy of the result text if any message follows the error
 				// result, so prefer the cause consumeQuery recorded off the result itself.
-				queryCtx.turnOutput.errorMessage ??= error instanceof Error ? error.message : String(error);
+				if (queryCtx.turnOutput.errorMessage === undefined) {
+					const text = error instanceof Error ? error.message : String(error);
+					queryCtx.turnOutput.errorMessage = signedOutText(text, account) ?? text;
+				}
 			}
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
 				queryCtx.releasePendingToolCalls("Query ended");
@@ -2183,7 +2222,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			// The session built for a side request is scoped to that request, however it
 			// ended. When Claude Code kept the id we resumed, the completion handler above
 			// has already deleted it and this is a no-op.
-			if (side && syncResult.sessionId) deleteSession(syncResult.sessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
+			if (side && syncResult.sessionId) deleteSession(syncResult.sessionId, cwd, claudeDir);
 			if (queryCtx.promptStream === promptStream) queryCtx.promptStream = null;
 			// A later query claiming this context sets activeQuery to its own handle;
 			// null means the .then/.catch above cleared ours and nothing replaced it.
@@ -2224,6 +2263,8 @@ async function promptAndWait(
 	const model = resolveModel(requestedModel);
 	const modelId = model?.id ?? requestedModel;
 	const cliModel = model ? claudeCodeModelId(model, longContextSettings) : modelId;
+	const account = getActiveAccount();
+	const claudeDir = accountClaudeDir(account);
 
 	// Session resume for shared mode — reuse provider's session if it exists,
 	// otherwise create one from pi's context.
@@ -2231,14 +2272,14 @@ async function promptAndWait(
 	// provider call will see missed messages and trigger a Case 4 rebuild.
 	let resumeSessionId: string | null = null;
 	if (!options?.isolated && options?.context?.length) {
-		if (sharedSession) {
+		if (sharedSession && sharedSession.claudeDir === claudeDir) {
 			// Provider already has a session — just resume from it
 			// Any missed messages from other providers were already handled by the provider's Case 4
 			resumeSessionId = sharedSession.sessionId;
 		} else {
 			// No provider session yet — create one from pi's context
 			const contextWithPrompt = [...options.context, { role: "user" as const, content: prompt, timestamp: Date.now() }];
-			const sync = syncSharedSession(contextWithPrompt as Context["messages"], cwd, undefined, cliModel);
+			const sync = syncSharedSession(contextWithPrompt as Context["messages"], cwd, undefined, cliModel, claudeDir);
 			resumeSessionId = sync.sessionId;
 		}
 	}
@@ -2287,7 +2328,7 @@ async function promptAndWait(
 		prompt,
 		options: {
 			cwd,
-			env: stampedChildEnv(process.env, piSessionId),
+			env: accountEnv(stampedChildEnv(process.env, piSessionId), account),
 			permissionMode: "bypassPermissions",
 			settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
 			skills: [],
@@ -2397,6 +2438,9 @@ const PREVIEW_MAX_LINES = 6;
 let askClaudeToolName = "AskClaude";
 
 export default function (pi: ExtensionAPI) {
+	// First, so the bridge's own handlers are registered after it: some unit-test
+	// hosts keep only the last handler per event.
+	registerAccounts(pi);
 	// Disable non-essential Claude Code traffic (update checks, MCP registry, telemetry)
 	process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
 
@@ -2425,10 +2469,10 @@ export default function (pi: ExtensionAPI) {
 		if (unregisterClaudeUsageAdapter) return;
 		const owner = createClaudeUsageAdapterOwner();
 		unregisterClaudeUsageAdapter = registerClaudeUsageAdapter(
-			(options) =>
-				lastInlineUsageSnapshot !== undefined
-					? Promise.resolve(lastInlineUsageSnapshot)
-					: refreshClaudeUsage(options, undefined, owner),
+			(options) => {
+				const cached = cachedUsageForActiveAccount();
+				return cached !== undefined ? Promise.resolve(cached) : refreshClaudeUsage(options, undefined, owner);
+			},
 		);
 		ownedUsageAdapterOwner = owner;
 		ownsUsageAdapter = true;
