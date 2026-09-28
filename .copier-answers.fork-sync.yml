@@ -1,0 +1,14 @@
+# This file records the answers muda used to render this kit.
+# It is managed by muda (copier). Do not edit by hand; re-render instead.
+_commit: v0.2.0
+_src_path: https://github.com/schuettc/muda.git
+build_cmd: ''
+cron_minute: 17
+kit: fork-sync
+pkg_dir: .
+pkg_name: '@schuettc/pi-claude-bridge'
+tag_prefix: v
+test_cmd: npm ci && npm run typecheck && npm run test:unit
+upstream_branch: main
+upstream_repo: elidickinson/pi-claude-bridge
+
