@@ -1088,3 +1088,97 @@ describe("standalone provider warning policy", () => {
 		assert.equal(entries.length, 1);
 	});
 });
+
+describe("refresh on every account switch", () => {
+	const accountA = { id: "a1", name: "a", configDir: "/tmp/accounts/a1" };
+	const accountB = { id: "b1", name: "b", configDir: "/tmp/accounts/b1" };
+
+	afterEach(() => {
+		acc.resetAccountStateForTest();
+	});
+
+	it("a switch to a different account refreshes and publishes a snapshot stamped with the new account, in its own env", async () => {
+		clearBus();
+		let queryInput;
+		let usageCalls = 0;
+		__test.setUsageControlQuery((input) => {
+			queryInput = input;
+			return {
+				async usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET() { usageCalls++; return ACCOUNT_USAGE; },
+				close() {},
+			};
+		});
+		acc.setActiveAccount(accountA);
+		const handlers = activateHarness();
+		handlers.get("session_start")({ reason: "startup" }, sessionContext(process.cwd(), "switch-session"));
+		const events = [];
+		const unsubscribe = globalThis[BUS_SYMBOL].subscribe((event) => events.push(event));
+		try {
+			acc.setActiveAccount(accountB);
+			await __test.waitForOverageRefresh(accountB.id);
+			assert.equal(usageCalls, 1, "exactly one refresh");
+			assert.equal(queryInput.options.env.CLAUDE_CONFIG_DIR, accountB.configDir, "refreshed in the new account's env");
+			assert.equal(events.length, 1, "one published snapshot");
+			assert.equal(events[0].type, "snapshot");
+			assert.equal(events[0].snapshot.account.id, accountB.id);
+		} finally {
+			unsubscribe();
+			handlers.get("session_shutdown")();
+			__test.setUsageControlQuery();
+		}
+	});
+
+	it("switching to the already-active account is a no-op: no refresh", async () => {
+		clearBus();
+		let usageCalls = 0;
+		__test.setUsageControlQuery(() => ({
+			async usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET() { usageCalls++; return ACCOUNT_USAGE; },
+			close() {},
+		}));
+		acc.setActiveAccount(accountB);
+		const handlers = activateHarness();
+		handlers.get("session_start")({ reason: "startup" }, sessionContext(process.cwd(), "switch-session"));
+		const events = [];
+		const unsubscribe = globalThis[BUS_SYMBOL].subscribe((event) => events.push(event));
+		try {
+			acc.setActiveAccount({ ...accountB }); // a different object, same id: not a real switch
+			await Promise.resolve();
+			await Promise.resolve();
+			assert.equal(usageCalls, 0);
+			assert.equal(events.length, 0);
+		} finally {
+			unsubscribe();
+			handlers.get("session_shutdown")();
+			__test.setUsageControlQuery();
+		}
+	});
+
+	it("a switch-all notice refreshes exactly like a direct switch", async () => {
+		clearBus();
+		let queryInput;
+		__test.setUsageControlQuery((input) => {
+			queryInput = input;
+			return {
+				async usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET() { return ACCOUNT_USAGE; },
+				close() {},
+			};
+		});
+		acc.setActiveAccount(accountA);
+		const handlers = activateHarness();
+		handlers.get("session_start")({ reason: "startup" }, sessionContext(process.cwd(), "switch-session"));
+		const events = [];
+		const unsubscribe = globalThis[BUS_SYMBOL].subscribe((event) => events.push(event));
+		try {
+			// account-command.ts's applyNotice calls the same acc.setActiveAccount this hook listens on.
+			acc.setActiveAccount(accountB);
+			await __test.waitForOverageRefresh(accountB.id);
+			assert.equal(events.length, 1);
+			assert.equal(events[0].snapshot.account.id, accountB.id);
+			assert.equal(queryInput.options.env.CLAUDE_CONFIG_DIR, accountB.configDir);
+		} finally {
+			unsubscribe();
+			handlers.get("session_shutdown")();
+			__test.setUsageControlQuery();
+		}
+	});
+});

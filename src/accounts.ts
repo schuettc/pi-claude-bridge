@@ -147,8 +147,39 @@ export function getActiveAccount(): Account {
 	return accountState().active;
 }
 
+// On globalThis for the same reason as accountState: a subagent can load this module
+// fresh, and it must still be notified by (or notify) the same listener set.
+const ACTIVE_ACCOUNT_LISTENERS_KEY = Symbol.for("pi-claude-bridge.accounts.active-change-listeners.v1");
+
+function activeAccountListeners(): Set<(account: Account) => void> {
+	const g = globalThis as Record<symbol, Set<(account: Account) => void> | undefined>;
+	return (g[ACTIVE_ACCOUNT_LISTENERS_KEY] ??= new Set());
+}
+
+/** Be told whenever the active account actually changes (a switch to the account already
+ *  active is not a change). Fires for every way this process's active account can change:
+ *  switchTo (panel and /claude-account use or all), a switch-all notice applied from another
+ *  pane, session restore, and account removal falling back off the removed one. */
+export function subscribeActiveAccountChange(listener: (account: Account) => void): () => void {
+	const listeners = activeAccountListeners();
+	listeners.add(listener);
+	return () => {
+		listeners.delete(listener);
+	};
+}
+
 export function setActiveAccount(account: Account): void {
-	accountState().active = account;
+	const state = accountState();
+	const changed = state.active.id !== account.id;
+	state.active = account;
+	if (!changed) return;
+	for (const listener of [...activeAccountListeners()]) {
+		try {
+			listener(account);
+		} catch {
+			// Isolate listeners so one cannot stop another from hearing about the switch.
+		}
+	}
 }
 
 export function resetAccountStateForTest(): void {
