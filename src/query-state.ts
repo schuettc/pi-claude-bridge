@@ -7,6 +7,7 @@
 // Extracted from index.ts so tests can import without activating the extension.
 
 import type { AssistantMessage, AssistantMessageEventStream, Model } from "@earendil-works/pi-ai";
+import type { Account } from "./accounts.js";
 import type { McpResult } from "./extract-tool-results.js";
 import type { PromptStream } from "./prompt-stream.js";
 
@@ -38,6 +39,11 @@ export class QueryContext {
 	 *  supply an id.
 	 */
 	piSessionId: string | null = null;
+	/** The account this query runs under, captured once at query start so a mid-turn
+	 *  switch (the switch-all listener polls every 1s) cannot change whose usage a
+	 *  rate_limit_event this query receives gets attributed to. Null for a query
+	 *  context tests construct without going through the provider's fresh-query path. */
+	account: Account | null = null;
 	/** pi rewrote the history this query was built from (session_compact,
 	 *  session_tree in its own pi session). Set by markRebuildForSession, consumed
 	 *  by the tool-result delivery that discards the query. Not session-wide state:

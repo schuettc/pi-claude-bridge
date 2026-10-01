@@ -126,4 +126,44 @@ describe("usage meter follows the account", () => {
 		acc.setActiveAccount(acc.LAUNCH_ACCOUNT);
 		assert.equal(__test.cachedUsageForActiveAccount(), snapshot, "back on the first account: its snapshot again");
 	});
+
+	it("a rate_limit_event is attributed to the account the query started under, not whichever is active when it arrives", async () => {
+		const { QueryContext } = await import("../src/query-state.js");
+		const accountA = { id: "a1", name: "a", configDir: "/tmp/accounts/a1" };
+		const accountB = { id: "b1", name: "b", configDir: "/tmp/accounts/b1" };
+		acc.setActiveAccount(accountA);
+		const c = new QueryContext();
+		c.currentPiStream = { push() {}, end() {} };
+		c.resetTurnState({ api: "claude-bridge", provider: "claude-bridge", id: "claude-fable-5-1" });
+		c.account = accountA; // what the provider path stamps at query start
+
+		// The query is mid-flight when the user switches to B.
+		acc.setActiveAccount(accountB);
+
+		async function* sdkMessages() {
+			yield {
+				type: "rate_limit_event",
+				rate_limit_info: {
+					status: "allowed",
+					isUsingOverage: false,
+					rateLimitType: "five_hour",
+					unifiedWindows: { five_hour: { utilization: 0.5, resetsAt: 1_800_000_000 } },
+				},
+			};
+		}
+		await __test.consumeQuery(
+			sdkMessages(),
+			new Map(),
+			{ api: "claude-bridge", provider: "claude-bridge", id: "claude-fable-5-1" },
+			() => false,
+			c,
+		);
+
+		// B is active now, so B's meter must not see A's snapshot.
+		assert.equal(__test.cachedUsageForActiveAccount(), undefined);
+		acc.setActiveAccount(accountA);
+		const snapshot = __test.cachedUsageForActiveAccount();
+		assert.ok(snapshot, "A's snapshot is cached under A");
+		assert.equal(snapshot.account.id, accountA.id);
+	});
 });
