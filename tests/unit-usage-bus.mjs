@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 const BUS_SYMBOL = Symbol.for("pi.provider-usage.bus.v1");
 const usageBus = await import("../src/usage-bus.js");
 const warningState = await import("../src/usage-warning-state.js");
+const acc = await import("../src/accounts.js");
 const { default: activate, __test } = await import("../src/index.js");
 
 const ACCOUNT_USAGE = {
@@ -548,6 +549,45 @@ describe("Claude provider usage protocol", () => {
 		assert.equal(closeCalls, 1);
 		assert.equal(snapshot.version, 1);
 		assert.equal(snapshot.provider, "claude");
+	});
+
+	it("keeps claude.ai usage traffic enabled on the usage-refresh child, and still scopes it to the active account", async () => {
+		acc.resetAccountStateForTest();
+		const work = { id: "w1", name: "work", configDir: "/tmp/accounts/w1" };
+		acc.setActiveAccount(work);
+		let queryInput;
+		const sdkQuery = {
+			async usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET() { return ACCOUNT_USAGE; },
+			close() {},
+		};
+		try {
+			await __test.refreshClaudeUsage(
+				{ timeoutMs: 1_000 },
+				{
+					query: (input) => { queryInput = input; return sdkQuery; },
+					cwd: "/tmp/usage-project",
+					env: { HOME: "/tmp/home", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" },
+					provider: {},
+				},
+			);
+		} finally {
+			acc.resetAccountStateForTest();
+		}
+		assert.equal("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" in queryInput.options.env, false);
+		assert.equal(queryInput.options.env.CLAUDE_CONFIG_DIR, work.configDir);
+		assert.equal(queryInput.options.env.HOME, "/tmp/home");
+	});
+
+	it("a model-turn child env is unaffected: stampedChildEnv never touches the usage-traffic variable", () => {
+		const env = __test.stampedChildEnv({ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" }, "session");
+		assert.equal(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
+	});
+
+	it("names a null rate_limits response caused by disabled usage traffic", () => {
+		assert.throws(
+			() => usageBus.snapshotFromClaudeUsage({ subscription_type: "enterprise", rate_limits_available: true, rate_limits: null, behaviors: null }),
+			/Claude Code returned no plan usage \(rate_limits null\)/,
+		);
 	});
 
 	it("refresh aborts on timeout and still closes the SDK query", async () => {
