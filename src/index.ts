@@ -38,7 +38,7 @@ import {
 	type ProviderUsageEventV1,
 	type ProviderUsageSnapshotV1,
 } from "./usage-bus.js";
-import { accountClaudeDir, accountEnv, accountUsageIdentity, getActiveAccount, signedOutText } from "./accounts.js";
+import { accountClaudeDir, accountEnv, accountUsageIdentity, getActiveAccount, signedOutText, type Account } from "./accounts.js";
 import { registerAccounts } from "./account-command.js";
 import {
 	notifyWithStandaloneSessionPolicy,
@@ -199,9 +199,9 @@ let unregisterClaudeUsageAdapter: (() => void) | undefined;
 // account: after a switch, another account's snapshot would be the wrong meter.
 const inlineUsageSnapshots = new Map<string, ProviderUsageSnapshotV1>();
 
-function setInlineUsageSnapshot(snapshot: ProviderUsageSnapshotV1 | undefined): void {
+function setInlineUsageSnapshot(snapshot: ProviderUsageSnapshotV1 | undefined, account: Account = getActiveAccount()): void {
 	if (snapshot === undefined) inlineUsageSnapshots.clear();
-	else inlineUsageSnapshots.set(getActiveAccount().id, snapshot);
+	else inlineUsageSnapshots.set(account.id, snapshot);
 }
 
 function cachedUsageForActiveAccount(): ProviderUsageSnapshotV1 | undefined {
@@ -1771,9 +1771,14 @@ async function consumeQuery(
 		if (message.type === "rate_limit_event") {
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
+			// The event belongs to the account this query started under, not whichever
+			// account is active now: the switch-all listener polls every 1s, so a user
+			// can switch mid-turn and an event from the old query must not land on the
+			// new account's meter.
+			const eventAccount = queryCtx.account ?? getActiveAccount();
 			const rawSnapshot = snapshotFromClaudeRateLimitInfo(info);
-			const snapshot = rawSnapshot && { ...rawSnapshot, account: accountUsageIdentity(getActiveAccount()) };
-			if (snapshot?.complete) setInlineUsageSnapshot(snapshot);
+			const snapshot = rawSnapshot && { ...rawSnapshot, account: accountUsageIdentity(eventAccount) };
+			if (snapshot?.complete) setInlineUsageSnapshot(snapshot, eventAccount);
 			if (info?.status === "allowed") {
 				if (snapshot) publishProviderUsage({ version: 1, type: "snapshot", snapshot });
 				continue;
@@ -2236,7 +2241,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	const cwd = process.cwd();
 	// The account is captured once per turn: a switch mid-turn applies from the next one.
+	// Stamped onto the context so a rate_limit_event this query receives later is
+	// attributed to the account the query actually started under.
 	const account = getActiveAccount();
+	queryCtx.account = account;
 	const claudeDir = accountClaudeDir(account);
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
 	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
