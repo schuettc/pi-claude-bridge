@@ -23,3 +23,15 @@ process.on("exit", () => rmSync(logDir, { recursive: true, force: true }));
 const agentDir = mkdtempSync(join(tmpdir(), "claude-bridge-test-agent-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
 process.on("exit", () => rmSync(agentDir, { recursive: true, force: true }));
+
+// accountUsageIdentity's default (no injected readers) resolves the launch
+// account's label from `<CLAUDE_CONFIG_DIR ?? HOME>/.claude.json`. A test that
+// drives refreshClaudeUsage/consumeQuery on the launch account without
+// injecting readers would otherwise read the developer's real ~/.claude.json
+// (or $CLAUDE_CONFIG_DIR/.claude.json) — a real-filesystem, real-credentials
+// side effect no unit test should have. Point both at an empty temp dir so
+// every current and future test gets the name-fallback label instead.
+const fakeHome = mkdtempSync(join(tmpdir(), "claude-bridge-test-home-"));
+process.env.HOME = fakeHome;
+delete process.env.CLAUDE_CONFIG_DIR;
+process.on("exit", () => rmSync(fakeHome, { recursive: true, force: true }));
