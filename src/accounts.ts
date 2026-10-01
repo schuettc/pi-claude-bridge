@@ -216,9 +216,13 @@ export function accountUsageIdentity(account: Account, readers: UsageIdentityRea
 	} catch {
 		// Missing or malformed: fall back to the account's own name below.
 	}
+	const readEmail = label !== undefined;
 	label ??= account.name;
 
-	if (mtimeMs !== undefined) usageIdentityCache.set(account.id, { mtimeMs, label });
+	// Only a successfully-read email is cached: a file that exists but is
+	// transiently unreadable/malformed must be retried next call, not have its
+	// name-fallback remembered at this mtime until something else changes it.
+	if (mtimeMs !== undefined && readEmail) usageIdentityCache.set(account.id, { mtimeMs, label });
 	return { id: account.id, label };
 }
 
