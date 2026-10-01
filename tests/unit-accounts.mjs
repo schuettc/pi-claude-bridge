@@ -240,6 +240,35 @@ describe("usage-bus account identity", () => {
 		assert.deepEqual(acc.accountUsageIdentity(work, countingReaders), { id: work.id, label: "second@example.com" });
 		assert.equal(reads, 2, "a new mtime re-reads and picks up the re-sign-in");
 	});
+
+	it("does not cache the name fallback when the file exists but fails to read or parse", () => {
+		const path = join(work.configDir, ".claude.json");
+		let reads = 0;
+		const files = { [path]: "{ not json", [`${path}:mtime`]: 100 };
+		const countingReaders = {
+			readFile: (p) => { reads++; return readers(files).readFile(p); },
+			stat: (p) => readers(files).stat(p),
+		};
+		assert.deepEqual(acc.accountUsageIdentity(work, countingReaders), { id: work.id, label: work.name });
+		assert.deepEqual(acc.accountUsageIdentity(work, countingReaders), { id: work.id, label: work.name });
+		assert.equal(reads, 2, "a parse failure is never cached: every call re-reads at the same mtime");
+
+		files[path] = JSON.stringify({ oauthAccount: { emailAddress: "fixed@example.com" } });
+		assert.deepEqual(acc.accountUsageIdentity(work, countingReaders), { id: work.id, label: "fixed@example.com" });
+		assert.equal(reads, 3, "once the file parses, the email is read and can now be cached");
+	});
+
+	it("the real-filesystem default never reads the developer's actual ~/.claude.json in a unit test", () => {
+		// tests/lib/setup.mjs points HOME at an empty temp dir for the whole suite, so the
+		// launch account's real-filesystem default path resolves to a file that doesn't
+		// exist, and accountUsageIdentity falls back to LAUNCH_ACCOUNT's own name rather
+		// than the real machine's signed-in email. A reader-injected test cannot prove
+		// this by itself: it has to call accountUsageIdentity with no readers at all.
+		assert.equal(process.env.CLAUDE_CONFIG_DIR, undefined, "CLAUDE_CONFIG_DIR must not point at a real config dir in tests");
+		assert.equal(homedir(), process.env.HOME, "os.homedir() must follow setup.mjs's redirected HOME");
+		assert.ok(homedir().includes(tmpdir()), "HOME must be a throwaway temp dir, not the developer's real home");
+		assert.deepEqual(acc.accountUsageIdentity(acc.LAUNCH_ACCOUNT), { id: "launch", label: acc.LAUNCH_ACCOUNT.name });
+	});
 });
 
 describe("signed-out text", () => {
