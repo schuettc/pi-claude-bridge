@@ -1153,6 +1153,43 @@ describe("refresh on every account switch", () => {
 		}
 	});
 
+	it("only the adapter owner refreshes on a switch: a second in-process activate() never duplicates it", async () => {
+		clearBus();
+		let usageCalls = 0;
+		__test.setUsageControlQuery(() => ({
+			async usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET() { usageCalls++; return ACCOUNT_USAGE; },
+			close() {},
+		}));
+		acc.setActiveAccount(accountA);
+		const ownerHandlers = activateHarness();
+		ownerHandlers.get("session_start")({ reason: "startup" }, sessionContext(process.cwd(), "owner-session"));
+		// A second in-process activate() call, as pi's subagent/child-session factory
+		// path does: shares this module instance but must not own the usage adapter.
+		const childHandlers = activateHarness();
+		childHandlers.get("session_start")({ reason: "startup" }, sessionContext(process.cwd(), "child-session"));
+		const events = [];
+		const unsubscribe = globalThis[BUS_SYMBOL].subscribe((event) => events.push(event));
+		try {
+			acc.setActiveAccount(accountB);
+			await __test.waitForOverageRefresh(accountB.id);
+			assert.equal(usageCalls, 1, "exactly one refresh across owner + child");
+			assert.equal(events.length, 1, "exactly one published snapshot");
+			assert.equal(events[0].snapshot.account.id, accountB.id);
+
+			// Shut the owner down; the child is still subscribed but must stay a no-op.
+			ownerHandlers.get("session_shutdown")();
+			acc.setActiveAccount(accountA);
+			await Promise.resolve();
+			await Promise.resolve();
+			assert.equal(usageCalls, 1, "no refresh from the child after the owner shut down");
+			assert.equal(events.length, 1, "no further published snapshot");
+		} finally {
+			unsubscribe();
+			childHandlers.get("session_shutdown")();
+			__test.setUsageControlQuery();
+		}
+	});
+
 	it("a switch-all notice refreshes exactly like a direct switch", async () => {
 		clearBus();
 		let queryInput;
