@@ -6,7 +6,7 @@ import type { AccountService, Result, SigninOutcome } from "./account-service.js
 import { BOX_WIDTH, PADDING, renderBox, type PanelTheme } from "./panel-box.js";
 import type { AuthStatus, SigninRun } from "./signin.js";
 
-type PanelService = Pick<AccountService, "load" | "active" | "switchTo" | "setDefault" | "rename" | "remove" | "add" | "signInAgain">;
+type PanelService = Pick<AccountService, "load" | "active" | "switchTo" | "switchAll" | "setDefault" | "rename" | "remove" | "add" | "signInAgain">;
 
 export interface AccountsPanelOptions {
 	service: PanelService;
@@ -23,7 +23,7 @@ const NAME_WIDTH = 11;
 const DEFAULT_TAG = " default";
 const HELP_LINES = 3;
 const FOOTERS: Record<Mode, string> = {
-	list: "↑↓ select · enter use · d default · esc close",
+	list: "↑↓ · enter use · a all · d default · esc close",
 	name: "enter save · esc back",
 	rename: "enter save · esc back",
 	confirmRemove: "y remove · any other key keeps it",
@@ -120,6 +120,8 @@ export class AccountsPanel implements Component {
 		} else if (matchesKey(data, "enter") || data === "\n" || data === " ") {
 			if (account) this.#use(account);
 			else this.#openInput("name", "");
+		} else if (data === "a" && account) {
+			this.#show(this.#o.service.switchAll(account.name), `Switched every open session to ${account.name} (next turn).`);
 		} else if (data === "d" && account) {
 			this.#show(this.#o.service.setDefault(account.name), `New sessions start on ${account.name}.`);
 		} else if (data === "r" && account) {
@@ -161,7 +163,7 @@ export class AccountsPanel implements Component {
 		if (!account) return "Sign in another Claude account in your browser. The browser is signed out of claude.ai first.";
 		const status = this.#status.get(account.id);
 		if (status && status !== "loading" && !status.loggedIn) return "Signed out. Enter signs this account in again in your browser.";
-		return `This session uses ${this.#o.service.active().name}. Enter switches this session; d sets default; r renames; x removes.`;
+		return `This session uses ${this.#o.service.active().name}. Enter switches this session; a switches every session; d sets default; r renames; x removes.`;
 	}
 
 	#removePrompt(): string {
