@@ -16,7 +16,7 @@ export const LAUNCH_ID = "launch";
 export const ACCOUNT_ENTRY_TYPE = "claude-bridge-account";
 // Subcommand words of /claude-account: an account with one of these names could
 // not be switched to by name.
-export const RESERVED_NAMES: readonly string[] = ["add", "list", "remove", "use"];
+export const RESERVED_NAMES: readonly string[] = ["add", "all", "list", "remove", "rename", "use"];
 // An environment credential outranks a config directory's stored login, so a
 // named account must not inherit one (verified in upstream PR #60).
 const TOKEN_VARS = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] as const;

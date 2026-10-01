@@ -2,8 +2,10 @@
 // session wiring that restores each session's account and shows it in the footer.
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { SwitchAllListener, type SwitchAllNotice } from "./account-broadcast.js";
 import {
 	ACCOUNT_ENTRY_TYPE,
+	byId,
 	accountState,
 	accountsRoot,
 	getActiveAccount,
@@ -21,6 +23,19 @@ import { readAuthStatus, signOut, startSignin, type AuthStatus, type SigninRun }
 
 export const STATUS_KEY = "claude-account";
 
+// The one listener per process that applies "use in all sessions" notices. It
+// belongs to the top-level session; an in-process subagent session never claims
+// it, so a switch is recorded in the session the user is looking at.
+const LISTENER_KEY = Symbol.for("pi-claude-bridge.switch-all-listener.v1");
+type Owned = { listener: SwitchAllListener };
+const owned = () => (globalThis as Record<symbol, Owned | undefined>)[LISTENER_KEY];
+const setOwned = (value: Owned | undefined) => { (globalThis as Record<symbol, Owned | undefined>)[LISTENER_KEY] = value; };
+
+export function resetSwitchAllForTest(): void {
+	owned()?.listener.stop();
+	setOwned(undefined);
+}
+
 export interface AccountsWiringDeps {
 	root?: string;
 	startSignin?(account: Account): SigninRun;
@@ -30,9 +45,11 @@ export interface AccountsWiringDeps {
 
 const SUBCOMMANDS: AutocompleteItem[] = [
 	{ value: "add", label: "add", description: "Sign in another account in your browser" },
+	{ value: "all", label: "all", description: "Switch this and every open session to an account" },
 	{ value: "list", label: "list", description: "List the accounts" },
 	{ value: "default", label: "default", description: "Set the account new sessions start on" },
 	{ value: "remove", label: "remove", description: "Sign out and remove an account" },
+	{ value: "rename", label: "rename", description: "Rename an account: rename <old> <new>" },
 	{ value: "use", label: "use", description: "Switch this session to an account" },
 ];
 
@@ -44,7 +61,7 @@ export function accountCompletions(prefix: string, accounts: Account[]): Autocom
 		const items = [...SUBCOMMANDS, ...names].filter((item) => item.value.startsWith(first));
 		return items.length ? items : null;
 	}
-	if (words.length === 2 && ["default", "remove", "use"].includes(words[0]!)) {
+	if (words.length === 2 && ["all", "default", "remove", "rename", "use"].includes(words[0]!)) {
 		const items = names
 			.filter((item) => item.value.startsWith(words[1]!))
 			.map((item) => ({ ...item, value: `${words[0]} ${item.value}` }));
@@ -78,6 +95,25 @@ export function registerAccounts(pi: ExtensionAPI, deps: AccountsWiringDeps = {}
 		onChange: refreshStatus,
 	});
 
+	let mine: Owned | undefined;
+	const applyNotice = (notice: SwitchAllNotice) => {
+		const account = byId(loadRegistry(root).registry, notice.id);
+		if (!account || account.id === getActiveAccount().id) return;
+		setActiveAccount(account);
+		pi.appendEntry<AccountEntryData>(ACCOUNT_ENTRY_TYPE, { id: account.id, name: account.name });
+		refreshStatus();
+		ui?.notify?.(`Switched to ${account.name} from another pane (from the next turn).`, "info");
+	};
+	// Claimed at each top-level session start, so a notice already on disk then
+	// counts as history, and released when the session shuts down.
+	const claimListener = () => {
+		owned()?.listener.stop();
+		mine = { listener: new SwitchAllListener(root, applyNotice) };
+		mine.listener.start();
+		setOwned(mine);
+	};
+	const ownsListener = () => mine !== undefined && owned() === mine;
+
 	pi.on("session_start", (event, ctx) => {
 		ui = ctx?.ui;
 		bridgeActive = ctx?.model?.baseUrl === "claude-bridge";
@@ -91,8 +127,22 @@ export function registerAccounts(pi: ExtensionAPI, deps: AccountsWiringDeps = {}
 			state.restored = true;
 			if (restored.notice) ctx?.ui?.notify?.(restored.notice, "warning");
 			if (problem) ctx?.ui?.notify?.(`Claude accounts: ${problem}. Using your usual login.`, "warning");
+			claimListener();
 		}
 		refreshStatus();
+	});
+
+	// A turn picks up a notice the file watcher missed, before the bridge captures
+	// the turn's account.
+	pi.on("turn_start", () => {
+		if (ownsListener()) mine!.listener.check();
+	});
+
+	pi.on("session_shutdown", () => {
+		if (!ownsListener()) return;
+		mine!.listener.stop();
+		setOwned(undefined);
+		mine = undefined;
 	});
 
 	pi.on("model_select", (event) => {
@@ -103,7 +153,7 @@ export function registerAccounts(pi: ExtensionAPI, deps: AccountsWiringDeps = {}
 	// Hosts and test doubles without commands still get the session wiring.
 	if (typeof pi.registerCommand !== "function") return;
 	pi.registerCommand("claude-account", {
-		description: "Claude accounts; or <name> | add <name> | default <name> | list | remove <name>",
+		description: "Claude accounts; or <name> | all <name> | add <name> | default <name> | rename <old> <new> | list | remove <name>",
 		getArgumentCompletions: (prefix) => accountCompletions(prefix, loadRegistry(root).registry.accounts),
 		handler: (args, ctx) => handle(args, ctx),
 	});
@@ -111,12 +161,12 @@ export function registerAccounts(pi: ExtensionAPI, deps: AccountsWiringDeps = {}
 	async function handle(args: string, ctx: ExtensionCommandContext): Promise<void> {
 		ui = ctx.ui;
 		bridgeActive = ctx.model?.baseUrl === "claude-bridge";
-		const [sub, arg] = args.trim().split(/\s+/).filter(Boolean);
+		const [sub, arg, arg2] = args.trim().split(/\s+/).filter(Boolean);
 		const report = (result: Result<unknown>, text: string) => {
 			if (result.ok) ctx.ui.notify(text, "info");
 			else ctx.ui.notify(result.reason, "warning");
 		};
-		const usage = () => ctx.ui.notify("usage: /claude-account [<name> | use <name> | add <name> | default <name> | list | remove <name>]", "warning");
+		const usage = () => ctx.ui.notify("usage: /claude-account [<name> | use <name> | all <name> | add <name> | default <name> | rename <old> <new> | list | remove <name>]", "warning");
 
 		if (!sub) {
 			if (ctx.mode === "tui") await openPanel(ctx);
@@ -137,6 +187,14 @@ export function registerAccounts(pi: ExtensionAPI, deps: AccountsWiringDeps = {}
 			return report(result, `Signed in ${arg}${as}.${note}`);
 		}
 		if (sub === "default" && arg) return report(service.setDefault(arg), `New sessions start on ${arg}.`);
+		if (sub === "all") {
+			if (!arg) return usage();
+			return report(service.switchAll(arg), `This session and every open session now use ${arg} (from the next turn).`);
+		}
+		if (sub === "rename") {
+			if (!arg || !arg2) return usage();
+			return report(service.rename(arg, arg2), `Renamed ${arg} to ${arg2}.`);
+		}
 		if (sub === "remove") {
 			if (!arg) return usage();
 			if (!ctx.hasUI) {

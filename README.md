@@ -102,8 +102,9 @@ Type `/claude-account` to open the accounts panel. Each session uses one account
 
 - **Add an account:** choose `+ Add account` and type a name. Your browser opens Claude's sign-in page (it signs the browser out of claude.ai first, so you can pick any account). Enter the account's email, click the link in the email, then Authorize.
 - **Switch this session:** select an account and press Enter. It takes effect on the next turn; the first turn after a switch sends the full history once, because the prompt cache belongs to the account.
+- **Switch every open session:** press `a` on an account. Every running pi session on this machine switches to it from its next turn, and each one records the switch, so resuming it later keeps that account. It doesn't change the default for new sessions.
 - **Other keys:** `d` makes an account the default for new sessions, `r` renames, `x` removes (signs it out and deletes its folder).
-- **Without the panel:** `/claude-account <name>`, `/claude-account add <name>`, `/claude-account default <name>`, `/claude-account list`, `/claude-account remove <name>`.
+- **Without the panel:** `/claude-account <name>`, `/claude-account all <name>`, `/claude-account add <name>`, `/claude-account default <name>`, `/claude-account rename <old> <new>`, `/claude-account list`, `/claude-account remove <name>`.
 
 Your existing login appears as `default` and is used until you add another account. Each added account is a Claude Code config directory under `~/.pi/agent/claude-bridge/accounts/`; the bridge never reads or stores credentials. Signing in is supported on macOS.
 

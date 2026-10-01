@@ -21,6 +21,7 @@ function fakeService({ accounts = [LAUNCH, WORK], defaultId = "launch", activeId
 		load: () => ({ registry: structuredClone(state.registry) }),
 		active: () => state.active,
 		switchTo(name) { state.calls.push(["switchTo", name]); state.active = find(name); return { ok: true, value: state.active }; },
+		switchAll(name) { state.calls.push(["switchAll", name]); state.active = find(name); return { ok: true, value: state.active }; },
 		setDefault(name) { state.calls.push(["setDefault", name]); state.registry.default = find(name).id; return { ok: true, value: find(name) }; },
 		rename(name, next) { state.calls.push(["rename", name, next]); if (next === "bad!") return { ok: false, reason: "Not renamed: bad name." }; find(name).name = next; return { ok: true, value: find(next) }; },
 		async remove(name) { state.calls.push(["remove", name]); state.registry.accounts = state.registry.accounts.filter((a) => a.name !== name); return { ok: true, value: {} }; },
@@ -80,7 +81,7 @@ describe("rows", () => {
 		assert.match(text, /→ default\s+●\s+default@example\.com · Max/);
 		assert.match(text, /work\s+work@example\.com · Max\s+default/);
 		assert.match(text, /\+ Add account/);
-		assert.match(text, /↑↓ select · enter use · d default · esc close/);
+		assert.match(text, /↑↓ · enter use · a all · d default · esc close/);
 	});
 
 	it("shows a signed-out account as signed out", async () => {
@@ -106,6 +107,20 @@ describe("keys", () => {
 		await press(DOWN, ENTER);
 		assert.equal(asked, "work");
 		assert.match(screen(), /✓ Signed in work as w@x\.io\./);
+	});
+
+	it("a switches this session and every open session, without setting the default", async () => {
+		const state = fakeService();
+		const { flat, press } = await open(state);
+		await press(DOWN, "a");
+		assert.deepEqual(state.calls, [["switchAll", "work"]]);
+		assert.equal(state.registry.default, "launch");
+		assert.match(flat(), /Switched every open session to work \(next turn\)\./);
+	});
+
+	it("the help line mentions switching every session", async () => {
+		const { flat } = await open(fakeService());
+		assert.match(flat(), /a switches every session/);
 	});
 
 	it("d sets the default", async () => {
