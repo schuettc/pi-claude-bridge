@@ -271,6 +271,47 @@ describe("usage-bus account identity", () => {
 	});
 });
 
+describe("active account change notifications", () => {
+	const accountB = { id: "b1", name: "b", configDir: "/tmp/accounts/b1" };
+	const accountC = { id: "c1", name: "c", configDir: "/tmp/accounts/c1" };
+
+	it("notifies a listener only when the active account id actually changes", () => {
+		const seen = [];
+		const unsubscribe = acc.subscribeActiveAccountChange((account) => seen.push(account.id));
+		try {
+			acc.setActiveAccount(accountB);
+			assert.deepEqual(seen, ["b1"]);
+			acc.setActiveAccount({ ...accountB }); // same id, different object (e.g. a rename): not a switch
+			assert.deepEqual(seen, ["b1"]);
+			acc.setActiveAccount(accountC);
+			assert.deepEqual(seen, ["b1", "c1"]);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("a listener that throws does not stop the others from being notified", () => {
+		const seen = [];
+		const unsubscribeBad = acc.subscribeActiveAccountChange(() => { throw new Error("boom"); });
+		const unsubscribeGood = acc.subscribeActiveAccountChange((account) => seen.push(account.id));
+		try {
+			assert.doesNotThrow(() => acc.setActiveAccount(accountB));
+			assert.deepEqual(seen, ["b1"]);
+		} finally {
+			unsubscribeBad();
+			unsubscribeGood();
+		}
+	});
+
+	it("unsubscribe stops further notifications", () => {
+		const seen = [];
+		const unsubscribe = acc.subscribeActiveAccountChange((account) => seen.push(account.id));
+		unsubscribe();
+		acc.setActiveAccount(accountB);
+		assert.deepEqual(seen, []);
+	});
+});
+
 describe("signed-out text", () => {
 	it("names the account for Claude Code's not-logged-in error", () => {
 		assert.equal(acc.signedOutText("Not logged in · Please run /login", work), 'Claude account "work" is signed out. /claude-account to sign in again.');

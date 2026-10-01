@@ -40,7 +40,15 @@ import {
 	type ProviderUsageEventV1,
 	type ProviderUsageSnapshotV1,
 } from "./usage-bus.js";
-import { accountClaudeDir, accountEnv, accountUsageIdentity, getActiveAccount, signedOutText, type Account } from "./accounts.js";
+import {
+	accountClaudeDir,
+	accountEnv,
+	accountUsageIdentity,
+	getActiveAccount,
+	signedOutText,
+	subscribeActiveAccountChange,
+	type Account,
+} from "./accounts.js";
 import { registerAccounts } from "./account-command.js";
 import {
 	notifyWithStandaloneSessionPolicy,
@@ -225,16 +233,28 @@ function updateCachedOverageResetsAt(accountId: string, resetsAt: number): void 
 // can arrive in quick succession, but only the first needs to kick off a refresh.
 const OVERAGE_REFRESH_DEBOUNCE_MS = 30_000;
 const lastOverageRefreshRequestedAt = new Map<string, number>();
-// Test-only: lets a test await the in-flight refresh a requestOverageRefresh call started.
-const overageRefreshInFlight = new Map<string, Promise<void>>();
+// Test-only: lets a test await the in-flight refresh a requestOverageRefresh or account-switch
+// call started, keyed by account id. Shared by both triggers: whichever started most recently
+// for an account is the one a test observes, which is always the one that matters to wait on.
+const usageRefreshInFlight = new Map<string, Promise<void>>();
 
-async function refreshOverageForAccount(account: Account): Promise<void> {
+function trackUsageRefresh(accountId: string, promise: Promise<void>): void {
+	usageRefreshInFlight.set(accountId, promise);
+	void promise.finally(() => {
+		if (usageRefreshInFlight.get(accountId) === promise) usageRefreshInFlight.delete(accountId);
+	});
+}
+
+/** Refresh an account's usage and publish the result. Used both by the debounced
+ *  overage-refresh trigger and by the on-every-switch refresh: a failed refresh is
+ *  swallowed either way, since pi-usage shows its own "checking"/"usage error" state
+ *  and a usage-meter refresh must never fail a turn. */
+async function refreshAndPublishUsageForAccount(account: Account): Promise<void> {
 	try {
 		const snapshot = await refreshClaudeUsage({ timeoutMs: 10_000 }, undefined, undefined, account);
 		publishProviderUsage({ version: 1, type: "snapshot", snapshot });
 	} catch {
-		// Swallowed: the usage adapter's own polling, or the next rate_limit_event, gets another
-		// chance. An overage refresh must never fail a turn.
+		// Swallowed; see doc comment above.
 	}
 }
 
@@ -243,10 +263,7 @@ function requestOverageRefresh(account: Account): void {
 	const last = lastOverageRefreshRequestedAt.get(account.id);
 	if (last !== undefined && now - last < OVERAGE_REFRESH_DEBOUNCE_MS) return;
 	lastOverageRefreshRequestedAt.set(account.id, now);
-	const promise = refreshOverageForAccount(account).finally(() => {
-		if (overageRefreshInFlight.get(account.id) === promise) overageRefreshInFlight.delete(account.id);
-	});
-	overageRefreshInFlight.set(account.id, promise);
+	trackUsageRefresh(account.id, refreshAndPublishUsageForAccount(account));
 }
 
 // Ours among pi-ai's api-provider registrations, so shutdown removes only the one
@@ -1031,7 +1048,7 @@ export const __test = {
 	setInlineUsageSnapshot,
 	cachedUsageForActiveAccount,
 	waitForOverageRefresh(accountId: string) {
-		return overageRefreshInFlight.get(accountId) ?? Promise.resolve();
+		return usageRefreshInFlight.get(accountId) ?? Promise.resolve();
 	},
 	resetOverageRefreshDebounceForTest() {
 		lastOverageRefreshRequestedAt.clear();
@@ -2856,6 +2873,13 @@ export default function (pi: ExtensionAPI) {
 		ownsUsageAdapter = true;
 	};
 	ensureUsageAdapter();
+	// Every account change in this process (switchTo, a switch-all notice, session restore) should
+	// refresh the meter for the account just switched to, not leave it showing the old one's numbers
+	// until the next poll or turn. Only the adapter owner refreshes: a non-owning in-process child
+	// session shares this module but must not duplicate the owner's refresh.
+	const unsubscribeActiveAccountChange = subscribeActiveAccountChange((account) => {
+		if (ownsUsageAdapter) trackUsageRefresh(account.id, refreshAndPublishUsageForAccount(account));
+	});
 
 	if (!config.startupNoticeShown) {
 		if (config.provider?.plan === undefined) pendingNotices.push('Are you using a Max plan? You need to set provider.plan to "max" to unlock 1M context in Opus.');
@@ -2972,6 +2996,7 @@ export default function (pi: ExtensionAPI) {
 			ownedUsageAdapterOwner = undefined;
 			ownsUsageAdapter = false;
 		}
+		unsubscribeActiveAccountChange();
 		// Not in clearSession: that also runs on session_start, and a live session
 		// still needs to be able to serve side requests.
 		if (registeredApiProvider) {
