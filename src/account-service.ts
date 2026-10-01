@@ -18,6 +18,7 @@ import {
 	type LoadedRegistry,
 	type Registry,
 } from "./accounts.js";
+import { writeSwitchAll } from "./account-broadcast.js";
 import type { AuthStatus, SigninRun } from "./signin.js";
 
 // Both branches name both fields: the repo compiles without strictNullChecks,
@@ -67,6 +68,14 @@ export class AccountService {
 		setActiveAccount(account);
 		this.#deps.onSwitch(account);
 		return ok(account);
+	}
+
+	/** Switch this session, then tell every other running session to follow.
+	 *  The default for new sessions is left alone. */
+	switchAll(name: string): Result<Account> {
+		const result = this.switchTo(name);
+		if (result.ok) writeSwitchAll(this.#deps.root, result.value);
+		return result;
 	}
 
 	setDefault(name: string): Result<Account> {

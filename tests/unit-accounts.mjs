@@ -84,7 +84,7 @@ describe("names", () => {
 		assert.match(acc.validateName("default", registry), /already exists/);
 	});
 	it("rejects subcommand words", () => {
-		for (const name of ["add", "list", "remove", "use"]) assert.match(acc.validateName(name, registry), /reserved/);
+		for (const name of ["add", "all", "list", "remove", "rename", "use"]) assert.match(acc.validateName(name, registry), /reserved/);
 	});
 	it("lets an account keep its own name when renaming", () => {
 		assert.equal(acc.validateName("work", registry, work.id), undefined);

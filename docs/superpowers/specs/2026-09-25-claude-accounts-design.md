@@ -201,3 +201,11 @@ Run by Court with `pi -ne -e <worktree>` on branch `feat/claude-accounts`, Claud
 4. Switched mid-conversation from `default` to `subaud`: the codeword was recalled, the footer showed `claude: subaud`, and the usage meter followed.
 5. Resumed the session in another pane: it came back on `subaud`.
 6. `tests/int-account-switch.mjs` with `CLAUDE_BRIDGE_TESTING_SECOND_ACCOUNT_DIR` set to `subaud`'s folder: pass.
+
+## Addendum (2026-09-30): use an account in every open session
+Approved by Court in chat. Optional, triggered only on request: `a` in the panel, or `/claude-account all <name>`. It switches this session and writes `<accounts root>/switch-all.json` (`{ stamp, id, name, pid, at }`, atomic). Each pi process's top-level session holds one `SwitchAllListener` (claimed at top-level `session_start`, released at `session_shutdown`). It watches the root, re-reads the notice every second (the macOS watcher can miss an event under load), and also checks at every `turn_start`. A new notice from another process switches the session the same way a manual switch does (session entry, footer, notice `Switched to <name> from another pane`), from the next turn.
+- A notice already on disk when a session starts or resumes is history and is never applied.
+- It does not change the default for new sessions (Court's call).
+- There is no per-session opt-out (Court's call; can be added later).
+- In-process subagent sessions never claim the listener; they follow their parent as before.
+- Also added: `/claude-account rename <old> <new>`. `all` and `rename` are now reserved names.
