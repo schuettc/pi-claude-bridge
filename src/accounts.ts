@@ -8,9 +8,11 @@
 // CLAUDE_CONFIG_DIR and an explicit ~/.claude are different Keychain entries.
 // Credentials never pass through this module.
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { UsageAccountV1 } from "./usage-bus.js";
 
 export const LAUNCH_ID = "launch";
 export const ACCOUNT_ENTRY_TYPE = "claude-bridge-account";
@@ -164,6 +166,60 @@ export function accountEnv(base: Record<string, string | undefined>, account: Ac
 /** The directory an account's Claude Code session files live under. */
 export function accountClaudeDir(account: Account): string | undefined {
 	return account.configDir ?? process.env.CLAUDE_CONFIG_DIR;
+}
+
+// Per account id: the label resolved for it, and the config file mtime it was
+// resolved from. A re-sign-in changes both the file's contents and its mtime,
+// so comparing the mtime is enough to notice without re-reading on every call.
+const usageIdentityCache = new Map<string, { mtimeMs: number; label: string }>();
+
+/** Test-only: clear the resolved-label cache so fixtures reusing an account id
+ *  across tests don't see a stale label cached against a coincidentally equal mtime. */
+export function __resetUsageIdentityCacheForTest(): void {
+	usageIdentityCache.clear();
+}
+
+/** Injection point for accountUsageIdentity's file reads — tests point these at
+ *  fixtures in a temp dir instead of the real ~/.claude.json. */
+export interface UsageIdentityReaders {
+	readFile?: (path: string) => string;
+	stat?: (path: string) => { mtimeMs: number };
+}
+
+/** The account's usage-bus identity: its id, and a label resolved from the email
+ *  claude.ai signed it in with. Reads `<configDir>/.claude.json` directly — the
+ *  launch account has no configDir, so it falls back the same way accountClaudeDir
+ *  does, to `~/.claude.json`. Falls back further to the account's own name when the
+ *  file is missing or malformed. Never throws: a usage snapshot must never be lost
+ *  over a label. Cached per account id + the file's mtime, so a re-sign-in is
+ *  picked up without reading the file on every refresh. */
+export function accountUsageIdentity(account: Account, readers: UsageIdentityReaders = {}): UsageAccountV1 {
+	const readFile = readers.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+	const stat = readers.stat ?? ((path: string) => statSync(path));
+	const configPath = join(accountClaudeDir(account) ?? homedir(), ".claude.json");
+
+	let mtimeMs: number | undefined;
+	try {
+		mtimeMs = stat(configPath).mtimeMs;
+	} catch {
+		// Missing file: no mtime to cache against, fall through to the account's name.
+	}
+
+	const cached = usageIdentityCache.get(account.id);
+	if (mtimeMs !== undefined && cached?.mtimeMs === mtimeMs) return { id: account.id, label: cached.label };
+
+	let label: string | undefined;
+	try {
+		const parsed = JSON.parse(readFile(configPath));
+		const email = parsed?.oauthAccount?.emailAddress;
+		if (typeof email === "string" && email.trim()) label = email.trim();
+	} catch {
+		// Missing or malformed: fall back to the account's own name below.
+	}
+	label ??= account.name;
+
+	if (mtimeMs !== undefined) usageIdentityCache.set(account.id, { mtimeMs, label });
+	return { id: account.id, label };
 }
 
 /** The account a session should run on: its latest account entry, else the default. */

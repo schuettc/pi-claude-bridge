@@ -4,6 +4,12 @@
 // another exclusively through the global symbol, regardless of load order.
 
 export type ProviderKeyV1 = "claude" | "codex";
+
+/** The account a snapshot was measured for, or an adapter's next refresh will measure. */
+export type UsageAccountV1 = {
+	id: string;
+	label?: string;
+};
 export type UsageProviderV1 = ProviderKeyV1;
 export type UsageStateV1 = "available" | "warning" | "rejected" | "unknown";
 export type UsageScopeV1 =
@@ -34,6 +40,8 @@ export type ProviderUsageSnapshotV1 = {
 	complete: boolean;
 	adapterId?: string;
 	windows: NormalizedUsageWindow[];
+	/** The account these numbers were measured for. Absent from older publishers. */
+	account?: UsageAccountV1;
 };
 
 export type ProviderUsageEventV1 =
@@ -58,6 +66,8 @@ export type ProviderUsageAdapterV1 = {
 	usageProvider: ProviderKeyV1;
 	modelProviders: string[];
 	refresh(options: { timeoutMs: number; signal?: AbortSignal }): Promise<ProviderUsageSnapshotV1>;
+	/** The account the adapter's next refresh will measure. Absent from older adapters. */
+	currentAccount?(): UsageAccountV1 | undefined;
 };
 
 export type ProviderUsageBusV1 = {
@@ -183,6 +193,10 @@ function isWindow(value: unknown): value is NormalizedUsageWindow {
 	return value.currency === undefined || nonEmptyString(value.currency);
 }
 
+function isAccount(value: unknown): value is UsageAccountV1 {
+	return isRecord(value) && nonEmptyString(value.id) && (value.label === undefined || nonEmptyString(value.label));
+}
+
 function isValidSnapshot(value: unknown): value is ProviderUsageSnapshotV1 {
 	return (
 		isRecord(value) &&
@@ -194,7 +208,8 @@ function isValidSnapshot(value: unknown): value is ProviderUsageSnapshotV1 {
 		typeof value.complete === "boolean" &&
 		(value.adapterId === undefined || nonEmptyString(value.adapterId)) &&
 		Array.isArray(value.windows) &&
-		value.windows.every(isWindow)
+		value.windows.every(isWindow) &&
+		(value.account === undefined || isAccount(value.account))
 	);
 }
 
@@ -206,7 +221,8 @@ function isValidAdapter(value: unknown): value is ProviderUsageAdapterV1 {
 		Array.isArray(value.modelProviders) &&
 		value.modelProviders.length > 0 &&
 		value.modelProviders.every(nonEmptyString) &&
-		typeof value.refresh === "function"
+		typeof value.refresh === "function" &&
+		(value.currentAccount === undefined || typeof value.currentAccount === "function")
 	);
 }
 
@@ -495,12 +511,16 @@ export function publishProviderUsage(event: ProviderUsageEventV1): number {
 	}
 }
 
-export function registerClaudeUsageAdapter(refresh: ProviderUsageAdapterV1["refresh"]): () => void {
+export function registerClaudeUsageAdapter(
+	refresh: ProviderUsageAdapterV1["refresh"],
+	currentAccount?: ProviderUsageAdapterV1["currentAccount"],
+): () => void {
 	const adapter: ProviderUsageAdapterV1 = {
 		id: "schuettc.pi-claude-bridge",
 		usageProvider: "claude",
 		modelProviders: ["claude-bridge"],
 		refresh,
+		...(currentAccount ? { currentAccount } : {}),
 	};
 	if (!isValidAdapter(adapter)) return () => {};
 	try {

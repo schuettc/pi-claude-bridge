@@ -38,7 +38,7 @@ import {
 	type ProviderUsageEventV1,
 	type ProviderUsageSnapshotV1,
 } from "./usage-bus.js";
-import { accountClaudeDir, accountEnv, getActiveAccount, signedOutText } from "./accounts.js";
+import { accountClaudeDir, accountEnv, accountUsageIdentity, getActiveAccount, signedOutText } from "./accounts.js";
 import { registerAccounts } from "./account-command.js";
 import {
 	notifyWithStandaloneSessionPolicy,
@@ -1360,11 +1360,15 @@ async function refreshClaudeUsage(
 		}
 		const strictMcpConfig = dependencies.provider.strictMcpConfig !== false;
 		const claudeExecutable = dependencies.provider.pathToClaudeCodeExecutable;
+		// Captured once: used both for the child env below and to stamp the
+		// snapshot this refresh returns, so the two never disagree about whose
+		// numbers these are even if a switch lands mid-refresh.
+		const account = getActiveAccount();
 		// The environment was captured at session start; the account can have
 		// changed since, so apply the active one at each refresh. Then drop
 		// CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: with it set, Claude Code's usage
 		// control returns `rate_limits: null` instead of real data (verified live).
-		const childEnv: Record<string, string | undefined> = { ...accountEnv(dependencies.env, getActiveAccount()) };
+		const childEnv: Record<string, string | undefined> = { ...accountEnv(dependencies.env, account) };
 		delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 		sdkQuery = dependencies.query({
 			prompt: emptyUsagePrompt(),
@@ -1392,7 +1396,7 @@ async function refreshClaudeUsage(
 			sdkQuery.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
 			aborted,
 		]);
-		return snapshotFromClaudeUsage(payload);
+		return { ...snapshotFromClaudeUsage(payload), account: accountUsageIdentity(account) };
 	} finally {
 		clearTimeout(timeout);
 		options.signal?.removeEventListener("abort", onCallerAbort);
@@ -1767,7 +1771,8 @@ async function consumeQuery(
 		if (message.type === "rate_limit_event") {
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
-			const snapshot = snapshotFromClaudeRateLimitInfo(info);
+			const rawSnapshot = snapshotFromClaudeRateLimitInfo(info);
+			const snapshot = rawSnapshot && { ...rawSnapshot, account: accountUsageIdentity(getActiveAccount()) };
 			if (snapshot?.complete) setInlineUsageSnapshot(snapshot);
 			if (info?.status === "allowed") {
 				if (snapshot) publishProviderUsage({ version: 1, type: "snapshot", snapshot });
@@ -2776,6 +2781,7 @@ export default function (pi: ExtensionAPI) {
 				const cached = cachedUsageForActiveAccount();
 				return cached !== undefined ? Promise.resolve(cached) : refreshClaudeUsage(options, undefined, owner);
 			},
+			() => accountUsageIdentity(getActiveAccount()),
 		);
 		ownedUsageAdapterOwner = owner;
 		ownsUsageAdapter = true;
