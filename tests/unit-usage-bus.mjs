@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 
 const BUS_SYMBOL = Symbol.for("pi.provider-usage.bus.v1");
 const usageBus = await import("../src/usage-bus.js");
@@ -743,6 +743,150 @@ describe("Claude provider usage protocol", () => {
 		assert.equal(events[1].snapshot.windows.find((window) => window.id === "five_hour").usedPercent, 12);
 		assert.match(events[2].message, /rate limited \(five_hour\)/);
 		assert.equal(events[2].snapshot.windows[0].usedPercent, 100);
+	});
+});
+
+describe("consumption accounts and overage (fixtures.json)", () => {
+	// Real Claude Code usage-control responses, captured live 2026-09-30 (see
+	// .superpowers/sdd/2026-09-30-usage-per-account/fixtures.json).
+	const MAX_WORKSHOP = {
+		subscription_type: "max",
+		rate_limits_available: true,
+		rate_limits: {
+			five_hour: { utilization: 0, resets_at: "2026-10-01T07:39:59.928507+00:00" },
+			seven_day: { utilization: 2, resets_at: "2026-10-07T06:59:59.928531+00:00" },
+			extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null, currency: null, decimal_places: null },
+			model_scoped: [{ display_name: "Fable", utilization: 0, resets_at: "2026-10-07T06:59:59.928730+00:00" }],
+		},
+		behaviors: null,
+	};
+	const MAX_SUBAUD = {
+		subscription_type: "max",
+		rate_limits_available: true,
+		rate_limits: {
+			five_hour: { utilization: 14, resets_at: "2026-10-01T05:09:59.968462+00:00" },
+			seven_day: { utilization: 46, resets_at: "2026-10-06T22:59:59.968482+00:00" },
+			extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null, currency: null, decimal_places: null },
+		},
+		behaviors: null,
+	};
+	const ENTERPRISE_FUNDAMENTAL = {
+		subscription_type: "enterprise",
+		rate_limits_available: true,
+		rate_limits: {
+			five_hour: null,
+			seven_day: null,
+			extra_usage: { is_enabled: true, monthly_limit: 500000, used_credits: 6944, utilization: 1.3888, currency: "USD", decimal_places: 2 },
+		},
+		behaviors: null,
+	};
+	const OVERAGE_EVENT_ENTERPRISE = {
+		status: "allowed",
+		resetsAt: 1793491200,
+		rateLimitType: "overage",
+		overageStatus: "allowed",
+		overageResetsAt: 1793491200,
+		isUsingOverage: false,
+		overageInUse: true,
+	};
+
+	afterEach(() => usageBus.__resetOverageActivityForTest());
+
+	it("a max account with credits off reports 5h/7d (+ Fable) and no spend window", () => {
+		const snapshot = usageBus.snapshotFromClaudeUsage(MAX_WORKSHOP, Date.now(), "workshop");
+		assert.deepEqual(snapshot.windows.map((w) => w.id), ["five_hour", "seven_day", "model_scoped:fable"]);
+		assert.equal(snapshot.windows.find((w) => w.scope.kind === "overage"), undefined);
+	});
+
+	it("a consumption (enterprise) account reports exactly one spend window in major currency units", () => {
+		const snapshot = usageBus.snapshotFromClaudeUsage(ENTERPRISE_FUNDAMENTAL, Date.now(), "fundamental");
+		const overageWindows = snapshot.windows.filter((w) => w.scope.kind === "overage");
+		assert.equal(overageWindows.length, 1, "exactly one window");
+		const window = overageWindows[0];
+		assert.equal(window.id, "extra_usage");
+		assert.equal(window.label, "spend");
+		assert.equal(window.usedAmount, 69.44);
+		assert.equal(window.limitAmount, 5000);
+		assert.equal(window.currency, "USD");
+		assert.ok(Math.abs(window.usedPercent - 1.3888) < 1e-9);
+	});
+
+	it("a plan (max) account with credits enabled reports the bucket as overage, not spend", () => {
+		const withCredits = {
+			...MAX_SUBAUD,
+			rate_limits: { ...MAX_SUBAUD.rate_limits, extra_usage: { ...MAX_SUBAUD.rate_limits.extra_usage, is_enabled: true } },
+		};
+		const snapshot = usageBus.snapshotFromClaudeUsage(withCredits, Date.now(), "subaud");
+		const window = snapshot.windows.find((w) => w.scope.kind === "overage");
+		assert.ok(window, "credits enabled: the bucket is shown");
+		assert.equal(window.label, "overage");
+	});
+
+	it("per-account overage activity: account A's active bucket does not leak into account B's", () => {
+		usageBus.snapshotFromClaudeUsage(ENTERPRISE_FUNDAMENTAL, Date.now(), "accountA");
+		// account B has never had a complete snapshot confirm its bucket is active, so a partial
+		// overage event for B is still suppressed even though A's bucket is active.
+		const suppressed = usageBus.snapshotFromClaudeRateLimitInfo(
+			{ status: "allowed_warning", rateLimitType: "overage", utilization: 0.9, resetsAt: 1_790_812_800 },
+			Date.now(),
+			"accountB",
+		);
+		assert.equal(suppressed, undefined);
+		const shown = usageBus.snapshotFromClaudeRateLimitInfo(
+			{ status: "allowed_warning", rateLimitType: "overage", utilization: 0.9, resetsAt: 1_790_812_800 },
+			Date.now(),
+			"accountA",
+		);
+		assert.ok(shown, "account A's bucket is active");
+	});
+
+	it("isOverageEventMissingUtilization: true for the enterprise overage fixture, false once unifiedWindows or utilization is present", () => {
+		assert.equal(usageBus.isOverageEventMissingUtilization(OVERAGE_EVENT_ENTERPRISE), true);
+		assert.equal(usageBus.isOverageEventMissingUtilization({ ...OVERAGE_EVENT_ENTERPRISE, utilization: 0.1 }), false);
+		assert.equal(usageBus.isOverageEventMissingUtilization({ ...OVERAGE_EVENT_ENTERPRISE, unifiedWindows: {} }), false);
+		assert.equal(usageBus.isOverageEventMissingUtilization({ rateLimitType: "five_hour" }), false, "not an overage type");
+		assert.equal(usageBus.isOverageEventMissingUtilization(undefined), false);
+	});
+
+	it("snapshotFromClaudeRateLimitInfo never builds a window for an overage event with no utilization", () => {
+		assert.equal(usageBus.snapshotFromClaudeRateLimitInfo(OVERAGE_EVENT_ENTERPRISE, Date.now(), "fundamental"), undefined);
+	});
+
+	it("an enterprise turn's overage event requests exactly one debounced refresh and never publishes an empty window; the refresh carries the remembered resetsAt", async () => {
+		clearBus();
+		__test.setUsageControlQuery((input) => ({
+			async usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET() { return ENTERPRISE_FUNDAMENTAL; },
+			close() {},
+		}));
+		acc.resetAccountStateForTest();
+		const fundamental = { id: "c33cb52c", name: "fundamental", configDir: "/tmp/accounts/c33cb52c" };
+		acc.setActiveAccount(fundamental);
+		const handlers = activateHarness();
+		handlers.get("session_start")({ reason: "startup" }, sessionContext(process.cwd(), "enterprise-session"));
+		const events = [];
+		const unsubscribe = globalThis[BUS_SYMBOL].subscribe((event) => events.push(event));
+		try {
+			const overageEvent = { type: "rate_limit_event", rate_limit_info: OVERAGE_EVENT_ENTERPRISE };
+			await consume([overageEvent]);
+			await consume([overageEvent]);
+			await consume([overageEvent]);
+			await __test.waitForOverageRefresh(fundamental.id);
+			// Exactly one refresh was requested (debounced) across all three events, so exactly one
+			// snapshot was published — never an empty placeholder window for the event itself.
+			assert.equal(events.length, 1, "exactly one refresh was requested and published");
+			const published = events[0];
+			assert.equal(published.type, "snapshot");
+			const window = published.snapshot.windows.find((w) => w.scope.kind === "overage");
+			assert.ok(window, "the published snapshot carries real spend data, not an empty window");
+			assert.equal(window.usedAmount, 69.44);
+			assert.equal(window.resetsAt, 1793491200);
+		} finally {
+			unsubscribe();
+			handlers.get("session_shutdown")();
+			__test.setUsageControlQuery();
+			__test.resetOverageRefreshDebounceForTest();
+			acc.resetAccountStateForTest();
+		}
 	});
 });
 
