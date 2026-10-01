@@ -8,7 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const acc = await import("../src/accounts.js");
-const { registerAccounts, accountCompletions, STATUS_KEY } = await import("../src/account-command.js");
+const { registerAccounts, accountCompletions, STATUS_KEY, resetSwitchAllForTest } = await import("../src/account-command.js");
+const bc = await import("../src/account-broadcast.js");
 
 let root;
 const WORK = () => ({ id: "a1b2c3d4", name: "work", configDir: join(root, "accounts", "a1b2c3d4") });
@@ -40,7 +41,7 @@ function harness({ accounts = [WORK()], defaultId = "launch" } = {}) {
 }
 
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), "account-command-")); });
-afterEach(() => { rmSync(root, { recursive: true, force: true }); acc.resetAccountStateForTest(); });
+afterEach(() => { resetSwitchAllForTest(); rmSync(root, { recursive: true, force: true }); acc.resetAccountStateForTest(); });
 
 describe("session restore", () => {
 	it("a new session starts on the default account", async () => {
@@ -160,5 +161,122 @@ describe("completions", () => {
 	it("offers account names after default, remove and use, as the whole argument", () => {
 		assert.deepEqual(accountCompletions("remove w", accounts).map((i) => i.value), ["remove work"]);
 		assert.equal(accountCompletions("add x", accounts), null);
+	});
+	it("offers all and rename, and account names after them", () => {
+		const first = accountCompletions("", accounts).map((i) => i.value);
+		assert.ok(first.includes("all") && first.includes("rename"));
+		assert.deepEqual(accountCompletions("all w", accounts).map((i) => i.value), ["all work"]);
+		assert.deepEqual(accountCompletions("rename w", accounts).map((i) => i.value), ["rename work"]);
+	});
+});
+
+describe("rename subcommand", () => {
+	it("rename <old> <new> renames the account, keeping its id", async () => {
+		const h = harness();
+		await h.run("rename work job");
+		const renamed = acc.byId(acc.loadRegistry(root).registry, "a1b2c3d4");
+		assert.equal(renamed.name, "job");
+		assert.deepEqual(h.notes.at(-1), ["info", "Renamed work to job."]);
+	});
+	it("needs both names", async () => {
+		const h = harness();
+		await h.run("rename work");
+		assert.equal(h.notes.at(-1)[0], "warning");
+		assert.equal(acc.byName(acc.loadRegistry(root).registry, "work").id, "a1b2c3d4");
+	});
+	it("reports a rejected new name", async () => {
+		const h = harness();
+		await h.run("rename work default");
+		assert.match(h.notes.at(-1)[1], /already exists/);
+	});
+});
+
+describe("use in all sessions", () => {
+	it("all <name> switches this session and tells the others, without changing the default", async () => {
+		const h = harness();
+		await h.emit("session_start", { reason: "startup" }, h.ctx());
+		await h.run("all work");
+		assert.equal(acc.getActiveAccount().name, "work");
+		assert.deepEqual(h.entries.at(-1).data, { id: "a1b2c3d4", name: "work" });
+		const notice = bc.readSwitchAll(root);
+		assert.equal(notice.id, "a1b2c3d4");
+		assert.equal(notice.pid, process.pid);
+		assert.equal(acc.loadRegistry(root).registry.default, "launch", "switching everyone is not setting the default");
+		assert.deepEqual(h.notes.at(-1), ["info", "This session and every open session now use work (from the next turn)."]);
+	});
+
+	it("all with an unknown name changes nothing", async () => {
+		const h = harness();
+		await h.run("all nope");
+		assert.deepEqual(h.notes.at(-1), ["warning", 'No account named "nope".']);
+		assert.equal(bc.readSwitchAll(root), undefined);
+	});
+
+	it("another pane's notice switches this session at the next turn", async () => {
+		const h = harness();
+		await h.emit("session_start", { reason: "startup" }, h.ctx());
+		bc.writeSwitchAll(root, WORK(), 1);
+		await h.emit("turn_start", {}, h.ctx());
+		assert.equal(acc.getActiveAccount().name, "work");
+		assert.deepEqual(h.entries.at(-1).data, { id: "a1b2c3d4", name: "work" }, "recorded, so resume keeps it");
+		assert.deepEqual(h.statuses.at(-1), [STATUS_KEY, "claude: work"]);
+		assert.deepEqual(h.notes.at(-1), ["info", "Switched to work from another pane (from the next turn)."]);
+	});
+
+	it("applies the notice once", async () => {
+		const h = harness();
+		await h.emit("session_start", { reason: "startup" }, h.ctx());
+		bc.writeSwitchAll(root, WORK(), 1);
+		await h.emit("turn_start", {}, h.ctx());
+		const count = h.entries.length;
+		await h.emit("turn_start", {}, h.ctx());
+		assert.equal(h.entries.length, count);
+	});
+
+	it("a notice from before the session started is never applied", async () => {
+		const h = harness();
+		bc.writeSwitchAll(root, WORK(), 1);
+		await h.emit("session_start", { reason: "startup" }, h.ctx());
+		await h.emit("turn_start", {}, h.ctx());
+		assert.equal(acc.getActiveAccount().id, "launch");
+	});
+
+	it("a resumed session keeps its own account, not an earlier switch-everyone", async () => {
+		const h = harness();
+		await h.emit("session_start", { reason: "startup" }, h.ctx());
+		bc.writeSwitchAll(root, WORK(), 1);
+		await h.emit("session_start", { reason: "resume" }, h.ctx({ sessionManager: { getBranch: () => [] } }));
+		await h.emit("turn_start", {}, h.ctx());
+		assert.equal(acc.getActiveAccount().id, "launch");
+	});
+
+	it("a notice already matching this session's account is silent", async () => {
+		const h = harness();
+		await h.emit("session_start", { reason: "startup" }, h.ctx());
+		bc.writeSwitchAll(root, acc.LAUNCH_ACCOUNT, 1);
+		const count = h.entries.length;
+		await h.emit("turn_start", {}, h.ctx());
+		assert.equal(h.entries.length, count);
+		assert.equal(h.notes.length, 0);
+	});
+
+	it("a notice for an account this pane cannot find is ignored", async () => {
+		const h = harness();
+		await h.emit("session_start", { reason: "startup" }, h.ctx());
+		bc.writeSwitchAll(root, { id: "deadbeef", name: "gone", configDir: "/x" }, 1);
+		await h.emit("turn_start", {}, h.ctx());
+		assert.equal(acc.getActiveAccount().id, "launch");
+	});
+
+	it("a subagent session in the same process does not apply notices itself", async () => {
+		const parent = harness();
+		await parent.emit("session_start", { reason: "startup" }, parent.ctx());
+		const child = harness();
+		await child.emit("session_start", { reason: "startup" }, child.ctx());
+		bc.writeSwitchAll(root, WORK(), 1);
+		await child.emit("turn_start", {}, child.ctx());
+		assert.equal(child.entries.length, 0, "the subagent's session gets no entry");
+		await parent.emit("turn_start", {}, parent.ctx());
+		assert.deepEqual(parent.entries.at(-1).data, { id: "a1b2c3d4", name: "work" });
 	});
 });
