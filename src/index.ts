@@ -1360,13 +1360,17 @@ async function refreshClaudeUsage(
 		}
 		const strictMcpConfig = dependencies.provider.strictMcpConfig !== false;
 		const claudeExecutable = dependencies.provider.pathToClaudeCodeExecutable;
+		// The environment was captured at session start; the account can have
+		// changed since, so apply the active one at each refresh. Then drop
+		// CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: with it set, Claude Code's usage
+		// control returns `rate_limits: null` instead of real data (verified live).
+		const childEnv: Record<string, string | undefined> = { ...accountEnv(dependencies.env, getActiveAccount()) };
+		delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 		sdkQuery = dependencies.query({
 			prompt: emptyUsagePrompt(),
 			options: {
 				cwd: dependencies.cwd,
-				// The environment was captured at session start; the account can have
-				// changed since, so apply the active one at each refresh.
-				env: accountEnv(dependencies.env, getActiveAccount()),
+				env: childEnv,
 				abortController,
 				tools: [],
 				strictMcpConfig,

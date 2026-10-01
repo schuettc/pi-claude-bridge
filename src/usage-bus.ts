@@ -331,6 +331,12 @@ export function __resetOverageActivityForTest(): void {
 
 /** Normalize the rate-limit section returned by the Agent SDK's usage control. */
 export function snapshotFromClaudeUsage(payload: unknown, capturedAt = Date.now()): ProviderUsageSnapshotV1 {
+	// CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC leaking into the usage-refresh child's env
+	// produces exactly this shape (rate_limits_available=true, rate_limits=null) with no
+	// other signal, so name it rather than falling into the generic "missing" message below.
+	if (isRecord(payload) && payload.rate_limits === null && payload.rate_limits_available === true) {
+		throw new Error("Claude Code returned no plan usage (rate_limits null).");
+	}
 	if (!isRecord(payload) || !isRecord(payload.rate_limits)) {
 		throw new Error("Claude usage response did not include plan rate limits.");
 	}
