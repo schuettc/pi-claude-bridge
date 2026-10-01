@@ -333,20 +333,45 @@ const SNAPSHOT_BASE = {
 const OVERAGE_RATE_LIMIT_TYPES = new Set(["overage", "extra_usage"]);
 
 /**
- * Whether the most recent complete snapshot showed the credits/overage bucket as active
- * (credits enabled, or real credits spent). Partial rate-limit events carry no is_enabled or
- * used_credits, so they defer to this to decide whether an "overage" window is real. Defaults
- * to false: overage stays hidden until a complete snapshot confirms the bucket is active.
+ * Per account: whether its most recent complete snapshot showed the credits/overage bucket as
+ * active (credits enabled, or real credits spent), and the last overageResetsAt a rate_limit_event
+ * carried for it. Partial rate-limit events carry no is_enabled or used_credits, so they defer to
+ * this to decide whether an "overage" window is real. An account absent from the map is inactive:
+ * overage stays hidden until a complete snapshot confirms the bucket is active.
  */
-let lastOverageActive = false;
+const overageStateByAccount = new Map<string, { active: boolean; resetsAt?: number }>();
 
-/** Reset the remembered overage activity. Test-only. */
+const DEFAULT_OVERAGE_ACCOUNT = "__default__";
+
+/** Reset the remembered overage activity and reset times for every account. Test-only. */
 export function __resetOverageActivityForTest(): void {
-	lastOverageActive = false;
+	overageStateByAccount.clear();
+}
+
+function setOverageActive(accountId: string, active: boolean): void {
+	overageStateByAccount.set(accountId, { ...overageStateByAccount.get(accountId), active });
+}
+
+function isOverageActive(accountId: string): boolean {
+	return overageStateByAccount.get(accountId)?.active === true;
+}
+
+/** Remember the epoch-seconds reset time an overage rate_limit_event carried for accountId,
+ *  so the next full snapshot built for it (which has no reset time of its own) can show one. */
+export function rememberOverageResetsAt(accountId: string, resetsAt: number): void {
+	overageStateByAccount.set(accountId, { active: overageStateByAccount.get(accountId)?.active ?? false, resetsAt });
+}
+
+function rememberedOverageResetsAt(accountId: string): number | undefined {
+	return overageStateByAccount.get(accountId)?.resetsAt;
 }
 
 /** Normalize the rate-limit section returned by the Agent SDK's usage control. */
-export function snapshotFromClaudeUsage(payload: unknown, capturedAt = Date.now()): ProviderUsageSnapshotV1 {
+export function snapshotFromClaudeUsage(
+	payload: unknown,
+	capturedAt = Date.now(),
+	accountId: string = DEFAULT_OVERAGE_ACCOUNT,
+): ProviderUsageSnapshotV1 {
 	// CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC leaking into the usage-refresh child's env
 	// produces exactly this shape (rate_limits_available=true, rate_limits=null) with no
 	// other signal, so name it rather than falling into the generic "missing" message below.
@@ -392,20 +417,28 @@ export function snapshotFromClaudeUsage(payload: unknown, capturedAt = Date.now(
 		const monthlyLimit = finiteNumber(extra.monthly_limit);
 		const currency = typeof extra.currency === "string" && extra.currency.trim() ? extra.currency : undefined;
 		const enabled = typeof extra.is_enabled === "boolean" ? extra.is_enabled : undefined;
-		// Only surface overage on usage-based accounts: credits explicitly enabled, or real spend
+		// Amounts are minor units (cents) at decimal_places (2 when absent): divide to get major units.
+		const divisor = 10 ** (finiteNumber(extra.decimal_places) ?? 2);
+		// A consumption (enterprise) account has no five_hour/seven_day plan windows at all: its only
+		// signal is this bucket, so label it "spend" rather than "overage" (a plan account's credits
+		// bucket on top of its plan windows).
+		const isSpendOnly = rateLimits.five_hour == null && rateLimits.seven_day == null;
+		// Only surface this bucket on usage-based accounts: credits explicitly enabled, or real spend
 		// recorded. A subscription account with credits off reports is_enabled=false and zero spend,
 		// so the window is dropped instead of showing a phantom utilization.
 		const overageActive = enabled === true || (usedCredits !== undefined && usedCredits > 0);
-		lastOverageActive = overageActive;
+		setOverageActive(accountId, overageActive);
 		if (overageActive) {
+			const resetsAt = rememberedOverageResetsAt(accountId);
 			windows.push({
 				id: "extra_usage",
-				label: "overage",
+				label: isSpendOnly ? "spend" : "overage",
 				...(utilization === undefined ? {} : { usedPercent: clampPercent(utilization) }),
 				...(enabled === undefined ? {} : { state: enabled ? "available" : "unknown" }),
-				...(usedCredits === undefined ? {} : { usedAmount: usedCredits / 100 }),
-				...(monthlyLimit === undefined ? {} : { limitAmount: monthlyLimit / 100 }),
+				...(usedCredits === undefined ? {} : { usedAmount: usedCredits / divisor }),
+				...(monthlyLimit === undefined ? {} : { limitAmount: monthlyLimit / divisor }),
 				...(currency === undefined ? {} : { currency }),
+				...(resetsAt === undefined ? {} : { resetsAt }),
 				scope: { kind: "overage" },
 			});
 		}
@@ -422,7 +455,11 @@ export function snapshotFromClaudeUsage(payload: unknown, capturedAt = Date.now(
  * known window. Older payloads that lack `unifiedWindows` fall back to the legacy single-window
  * (partial) behavior driven by the top-level `rateLimitType`/`utilization`.
  */
-export function snapshotFromClaudeRateLimitInfo(info: unknown, capturedAt = Date.now()): ProviderUsageSnapshotV1 | undefined {
+export function snapshotFromClaudeRateLimitInfo(
+	info: unknown,
+	capturedAt = Date.now(),
+	accountId: string = DEFAULT_OVERAGE_ACCOUNT,
+): ProviderUsageSnapshotV1 | undefined {
 	if (!isRecord(info)) return undefined;
 	const state =
 		info.status === "allowed_warning"
@@ -476,12 +513,16 @@ export function snapshotFromClaudeRateLimitInfo(info: unknown, capturedAt = Date
 	// Legacy fallback: older SDK payloads carry only a single top-level window.
 	if (typeof info.rateLimitType !== "string" || info.rateLimitType.trim() === "") return undefined;
 	const type = info.rateLimitType;
-	// Credits/overage events are only real on usage-based accounts; suppress them unless a complete
-	// snapshot has confirmed the bucket is active (see lastOverageActive).
 	const isOverage = OVERAGE_RATE_LIMIT_TYPES.has(type);
-	if (isOverage && !lastOverageActive) return undefined;
-	const metadata = ACCOUNT_WINDOWS[type] ?? { label: isOverage ? "overage" : type.replaceAll("_", " ") };
 	const utilization = finiteNumber(info.utilization);
+	// A consumption-account overage event with no utilization (e.g. only overageResetsAt) carries no
+	// usable money data at all; the caller (index.ts) requests a full refresh instead of this
+	// function inventing an empty window. See isOverageEventMissingUtilization.
+	if (isOverage && utilization === undefined) return undefined;
+	// Credits/overage events with a real utilization are only real on usage-based accounts; suppress
+	// them unless a complete snapshot has confirmed the bucket is active for this account.
+	if (isOverage && !isOverageActive(accountId)) return undefined;
+	const metadata = ACCOUNT_WINDOWS[type] ?? { label: isOverage ? "overage" : type.replaceAll("_", " ") };
 	const resetsAt = finiteNumber(info.resetsAt);
 	if (utilization === undefined && resetsAt === undefined && state === undefined) return undefined;
 	const window: NormalizedUsageWindow = {
@@ -500,6 +541,18 @@ export function snapshotFromClaudeRateLimitInfo(info: unknown, capturedAt = Date
 		complete: false,
 		windows: [window],
 	};
+}
+
+/**
+ * Whether a legacy-shaped (no unifiedWindows) rate_limit_event names the overage/extra_usage
+ * bucket but carries no utilization — the only signal it has is a reset time, so there is no
+ * money data to show. The bridge requests a full refresh for the event's account instead of
+ * publishing an empty window (see consumeQuery's rate_limit_event handling in index.ts).
+ */
+export function isOverageEventMissingUtilization(info: unknown): boolean {
+	if (!isRecord(info) || isRecord(info.unifiedWindows)) return false;
+	if (typeof info.rateLimitType !== "string" || !OVERAGE_RATE_LIMIT_TYPES.has(info.rateLimitType)) return false;
+	return finiteNumber(info.utilization) === undefined;
 }
 
 export function publishProviderUsage(event: ProviderUsageEventV1): number {

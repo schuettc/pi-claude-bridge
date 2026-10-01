@@ -30,8 +30,10 @@ import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, reso
 import { nonSystemMessages, toBridgeContext } from "./transcript.js";
 import { updateUsage, type SdkUsage } from "./usage.js";
 import {
+	isOverageEventMissingUtilization,
 	publishProviderUsage,
 	registerClaudeUsageAdapter,
+	rememberOverageResetsAt,
 	snapshotFromClaudeRateLimitInfo,
 	snapshotFromClaudeUsage,
 	type ProviderUsageAdapterV1,
@@ -206,6 +208,45 @@ function setInlineUsageSnapshot(snapshot: ProviderUsageSnapshotV1 | undefined, a
 
 function cachedUsageForActiveAccount(): ProviderUsageSnapshotV1 | undefined {
 	return inlineUsageSnapshots.get(getActiveAccount().id);
+}
+
+/** A later overage rate_limit_event can learn a reset time an already-cached inline snapshot
+ *  didn't have. Cheap to patch in place onto that account's cached spend/overage window, so a
+ *  consumer reading the cache before the next refresh still sees it. */
+function updateCachedOverageResetsAt(accountId: string, resetsAt: number): void {
+	const cached = inlineUsageSnapshots.get(accountId);
+	if (!cached) return;
+	const windows = cached.windows.map((window) => (window.scope.kind === "overage" ? { ...window, resetsAt } : window));
+	inlineUsageSnapshots.set(accountId, { ...cached, windows });
+}
+
+// At most one usage refresh per account per this window, triggered by an overage rate_limit_event
+// that carried no usable utilization (see isOverageEventMissingUtilization): several such events
+// can arrive in quick succession, but only the first needs to kick off a refresh.
+const OVERAGE_REFRESH_DEBOUNCE_MS = 30_000;
+const lastOverageRefreshRequestedAt = new Map<string, number>();
+// Test-only: lets a test await the in-flight refresh a requestOverageRefresh call started.
+const overageRefreshInFlight = new Map<string, Promise<void>>();
+
+async function refreshOverageForAccount(account: Account): Promise<void> {
+	try {
+		const snapshot = await refreshClaudeUsage({ timeoutMs: 10_000 }, undefined, undefined, account);
+		publishProviderUsage({ version: 1, type: "snapshot", snapshot });
+	} catch {
+		// Swallowed: the usage adapter's own polling, or the next rate_limit_event, gets another
+		// chance. An overage refresh must never fail a turn.
+	}
+}
+
+function requestOverageRefresh(account: Account): void {
+	const now = Date.now();
+	const last = lastOverageRefreshRequestedAt.get(account.id);
+	if (last !== undefined && now - last < OVERAGE_REFRESH_DEBOUNCE_MS) return;
+	lastOverageRefreshRequestedAt.set(account.id, now);
+	const promise = refreshOverageForAccount(account).finally(() => {
+		if (overageRefreshInFlight.get(account.id) === promise) overageRefreshInFlight.delete(account.id);
+	});
+	overageRefreshInFlight.set(account.id, promise);
 }
 
 // Ours among pi-ai's api-provider registrations, so shutdown removes only the one
@@ -989,6 +1030,12 @@ export const __test = {
 	},
 	setInlineUsageSnapshot,
 	cachedUsageForActiveAccount,
+	waitForOverageRefresh(accountId: string) {
+		return overageRefreshInFlight.get(accountId) ?? Promise.resolve();
+	},
+	resetOverageRefreshDebounceForTest() {
+		lastOverageRefreshRequestedAt.clear();
+	},
 	resetSharedSession(piSessionId?: string | null) {
 		// No id: full reset (the pre-map semantics — tests start from a blank slate).
 		if (piSessionId === undefined) sharedSessions.clear();
@@ -1325,6 +1372,7 @@ async function refreshClaudeUsage(
 	options: Parameters<ProviderUsageAdapterV1["refresh"]>[0],
 	injected?: UsageRefreshDependencies,
 	owner = claudeUsageAdapterOwner,
+	forAccount?: Account,
 ) {
 	const abortController = new AbortController();
 	const timeoutMs = Math.max(0, options.timeoutMs);
@@ -1362,8 +1410,10 @@ async function refreshClaudeUsage(
 		const claudeExecutable = dependencies.provider.pathToClaudeCodeExecutable;
 		// Captured once: used both for the child env below and to stamp the
 		// snapshot this refresh returns, so the two never disagree about whose
-		// numbers these are even if a switch lands mid-refresh.
-		const account = getActiveAccount();
+		// numbers these are even if a switch lands mid-refresh. forAccount lets an
+		// overage-triggered refresh target the query's account even if it is no
+		// longer the active one.
+		const account = forAccount ?? getActiveAccount();
 		// The environment was captured at session start; the account can have
 		// changed since, so apply the active one at each refresh. Then drop
 		// CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: with it set, Claude Code's usage
@@ -1396,7 +1446,7 @@ async function refreshClaudeUsage(
 			sdkQuery.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
 			aborted,
 		]);
-		return { ...snapshotFromClaudeUsage(payload), account: accountUsageIdentity(account) };
+		return { ...snapshotFromClaudeUsage(payload, undefined, account.id), account: accountUsageIdentity(account) };
 	} finally {
 		clearTimeout(timeout);
 		options.signal?.removeEventListener("abort", onCallerAbort);
@@ -1776,7 +1826,18 @@ async function consumeQuery(
 			// can switch mid-turn and an event from the old query must not land on the
 			// new account's meter.
 			const eventAccount = queryCtx.account ?? getActiveAccount();
-			const rawSnapshot = snapshotFromClaudeRateLimitInfo(info);
+			// A consumption-account overage event with no utilization carries no usable money
+			// data (only a reset time, sometimes): remember the reset time if there is one, and
+			// ask for a full refresh instead of publishing an empty window.
+			if (isOverageEventMissingUtilization(info)) {
+				if (typeof info.overageResetsAt === "number" && Number.isFinite(info.overageResetsAt)) {
+					rememberOverageResetsAt(eventAccount.id, info.overageResetsAt);
+					updateCachedOverageResetsAt(eventAccount.id, info.overageResetsAt);
+				}
+				requestOverageRefresh(eventAccount);
+				continue;
+			}
+			const rawSnapshot = snapshotFromClaudeRateLimitInfo(info, undefined, eventAccount.id);
 			const snapshot = rawSnapshot && { ...rawSnapshot, account: accountUsageIdentity(eventAccount) };
 			if (snapshot?.complete) setInlineUsageSnapshot(snapshot, eventAccount);
 			if (info?.status === "allowed") {
