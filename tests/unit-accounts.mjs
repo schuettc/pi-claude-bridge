@@ -5,7 +5,7 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const acc = await import("../src/accounts.js");
@@ -14,7 +14,10 @@ const tempRoot = () => mkdtempSync(join(tmpdir(), "claude-accounts-"));
 const work = { id: "a1b2c3d4", name: "work", configDir: "/tmp/accounts/a1b2c3d4" };
 const registryWith = (...accounts) => ({ version: 1, default: acc.LAUNCH_ID, accounts: [{ ...acc.LAUNCH_ACCOUNT }, ...accounts] });
 
-afterEach(() => acc.resetAccountStateForTest());
+afterEach(() => {
+	acc.resetAccountStateForTest();
+	acc.__resetUsageIdentityCacheForTest();
+});
 
 describe("registry file", () => {
 	it("a missing file means only the launch account", () => {
@@ -158,6 +161,84 @@ describe("restoring a session's account", () => {
 		const r = acc.restoreAccount([entry({ id: "deadbeef", name: "old" })], registry);
 		assert.equal(r.account.id, work.id);
 		assert.equal(r.notice, 'Account "old" no longer exists; using work.');
+	});
+});
+
+describe("usage-bus account identity", () => {
+	const readers = (files) => ({
+		readFile: (path) => {
+			if (!(path in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+			return files[path];
+		},
+		stat: (path) => {
+			if (!(path in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+			return { mtimeMs: files[`${path}:mtime`] ?? 1 };
+		},
+	});
+
+	it("reads the email from a named account's <configDir>/.claude.json", () => {
+		const path = join(work.configDir, ".claude.json");
+		const identity = acc.accountUsageIdentity(work, readers({
+			[path]: JSON.stringify({ oauthAccount: { emailAddress: "work@example.com" } }),
+		}));
+		assert.deepEqual(identity, { id: work.id, label: "work@example.com" });
+	});
+
+	it("falls back to ~/.claude.json for the launch account, honoring CLAUDE_CONFIG_DIR", () => {
+		const saved = process.env.CLAUDE_CONFIG_DIR;
+		try {
+			delete process.env.CLAUDE_CONFIG_DIR;
+			const homePath = join(homedir(), ".claude.json");
+			const viaHome = acc.accountUsageIdentity(acc.LAUNCH_ACCOUNT, readers({
+				[homePath]: JSON.stringify({ oauthAccount: { emailAddress: "launch@example.com" } }),
+				[`${homePath}:mtime`]: 1,
+			}));
+			assert.deepEqual(viaHome, { id: "launch", label: "launch@example.com" });
+
+			process.env.CLAUDE_CONFIG_DIR = "/launch-dir";
+			const viaConfigDir = acc.accountUsageIdentity(acc.LAUNCH_ACCOUNT, readers({
+				"/launch-dir/.claude.json": JSON.stringify({ oauthAccount: { emailAddress: "env@example.com" } }),
+				"/launch-dir/.claude.json:mtime": 2,
+			}));
+			assert.deepEqual(viaConfigDir, { id: "launch", label: "env@example.com" });
+		} finally {
+			if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
+		}
+	});
+
+	it("falls back to the account's name when the file is missing, and never throws", () => {
+		assert.deepEqual(acc.accountUsageIdentity(work, readers({})), { id: work.id, label: work.name });
+	});
+
+	it("falls back to the account's name when the file is malformed JSON", () => {
+		const path = join(work.configDir, ".claude.json");
+		assert.deepEqual(acc.accountUsageIdentity(work, readers({ [path]: "{ not json" })), { id: work.id, label: work.name });
+	});
+
+	it("falls back to the account's name when oauthAccount.emailAddress is missing", () => {
+		const path = join(work.configDir, ".claude.json");
+		assert.deepEqual(acc.accountUsageIdentity(work, readers({ [path]: JSON.stringify({ oauthAccount: {} }) })), { id: work.id, label: work.name });
+	});
+
+	it("caches by mtime, and picks up a re-sign-in once the mtime changes", () => {
+		const path = join(work.configDir, ".claude.json");
+		let reads = 0;
+		const files = {
+			[path]: JSON.stringify({ oauthAccount: { emailAddress: "first@example.com" } }),
+			[`${path}:mtime`]: 100,
+		};
+		const countingReaders = {
+			readFile: (p) => { reads++; return readers(files).readFile(p); },
+			stat: (p) => readers(files).stat(p),
+		};
+		assert.deepEqual(acc.accountUsageIdentity(work, countingReaders), { id: work.id, label: "first@example.com" });
+		assert.deepEqual(acc.accountUsageIdentity(work, countingReaders), { id: work.id, label: "first@example.com" });
+		assert.equal(reads, 1, "same mtime: the cached label is reused without re-reading");
+
+		files[path] = JSON.stringify({ oauthAccount: { emailAddress: "second@example.com" } });
+		files[`${path}:mtime`] = 200;
+		assert.deepEqual(acc.accountUsageIdentity(work, countingReaders), { id: work.id, label: "second@example.com" });
+		assert.equal(reads, 2, "a new mtime re-reads and picks up the re-sign-in");
 	});
 });
 

@@ -341,6 +341,22 @@ describe("Claude provider usage protocol", () => {
 		assert.deepEqual(bus.adapters(), []);
 	});
 
+	it("the registered adapter's currentAccount follows an account switch", () => {
+		clearBus();
+		acc.resetAccountStateForTest();
+		const handlers = activateHarness();
+		try {
+			const adapter = globalThis[BUS_SYMBOL].adapters()[0];
+			assert.equal(typeof adapter.currentAccount, "function");
+			assert.equal(adapter.currentAccount().id, "launch");
+			acc.setActiveAccount({ id: "w1", name: "work", configDir: "/tmp/accounts/w1" });
+			assert.equal(adapter.currentAccount().id, "w1");
+		} finally {
+			handlers.get("session_shutdown")();
+			acc.resetAccountStateForTest();
+		}
+	});
+
 	it("waits for the owning session_start when pi-usage refreshes first", async () => {
 		clearBus();
 		const root = mkdtempSync(join(tmpdir(), "claude-bridge-usage-owner-"));
@@ -502,6 +518,48 @@ describe("Claude provider usage protocol", () => {
 		assert.equal(bus.publish({ version: 1, type: "soft-warning", provider: "anthropic", message: "bad" }), 0);
 		assert.equal(bus.publish({ version: 1, type: "snapshot", snapshot: { version: 1 } }), 0);
 		assert.equal(calls, 0);
+	});
+
+	it("validates a snapshot's account field and an adapter's currentAccount field", () => {
+		clearBus();
+		const bus = usageBus.getUsageBusV1();
+		const baseSnapshot = { version: 1, provider: "claude", source: "s", capturedAt: 0, complete: true, windows: [] };
+
+		// Snapshot.account: undefined, or { id: non-empty, label?: non-empty }.
+		assert.equal(bus.publish({ version: 1, type: "snapshot", snapshot: baseSnapshot }), 0, "no listeners yet, but must not throw");
+		let events = [];
+		const unsubscribe = bus.subscribe((event) => events.push(event));
+		bus.publish({ version: 1, type: "snapshot", snapshot: { ...baseSnapshot, account: { id: "a1", label: "a@example.com" } } });
+		bus.publish({ version: 1, type: "snapshot", snapshot: { ...baseSnapshot, account: { id: "a1" } } });
+		assert.equal(events.length, 2, "a well-formed account, with or without a label, is accepted");
+		events = [];
+		bus.publish({ version: 1, type: "snapshot", snapshot: { ...baseSnapshot, account: { id: "" } } });
+		bus.publish({ version: 1, type: "snapshot", snapshot: { ...baseSnapshot, account: { id: "a1", label: "" } } });
+		bus.publish({ version: 1, type: "snapshot", snapshot: { ...baseSnapshot, account: "a1" } });
+		assert.equal(events.length, 0, "an empty id, empty label, or non-object account is rejected");
+		unsubscribe();
+
+		// Adapter.currentAccount: undefined, or a function.
+		const baseAdapter = { id: "x", usageProvider: "claude", modelProviders: ["claude-bridge"], refresh: async () => baseSnapshot };
+		const unregister1 = bus.register({ ...baseAdapter, currentAccount: () => ({ id: "a1" }) });
+		assert.equal(bus.adapters().length, 1, "a function currentAccount is accepted");
+		unregister1();
+		const unregister2 = bus.register({ ...baseAdapter, currentAccount: "not a function" });
+		assert.deepEqual(bus.adapters(), [], "a non-function currentAccount is rejected");
+		unregister2();
+	});
+
+	it("registerClaudeUsageAdapter carries currentAccount only when given one", () => {
+		clearBus();
+		const refresh = async () => usageBus.snapshotFromClaudeUsage(ACCOUNT_USAGE);
+		const withoutUnregister = usageBus.registerClaudeUsageAdapter(refresh);
+		assert.equal("currentAccount" in globalThis[BUS_SYMBOL].adapters()[0], false);
+		withoutUnregister();
+
+		const currentAccount = () => ({ id: "a1", label: "a@example.com" });
+		const withUnregister = usageBus.registerClaudeUsageAdapter(refresh, currentAccount);
+		assert.strictEqual(globalThis[BUS_SYMBOL].adapters()[0].currentAccount, currentAccount);
+		withUnregister();
 	});
 
 	it("refresh invokes only the SDK usage control with an empty prompt and closes", async () => {
